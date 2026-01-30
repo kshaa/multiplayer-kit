@@ -1,14 +1,25 @@
 pub mod builder;
 pub mod error;
-pub mod room;
 pub mod lobby;
+pub mod quic;
+pub mod rest;
+pub mod room;
 pub mod ticket;
 
+use crate::lobby::Lobby;
+use crate::quic::QuicState;
+use crate::rest::AppState;
+use crate::room::{RoomConfig, RoomManager};
+use crate::ticket::TicketManager;
+use actix_web::{web, App, HttpServer};
 use multiplayer_kit_protocol::{MessageContext, RejectReason, Route, UserContext};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
+use wtransport::Identity;
+use wtransport::ServerConfig as WtServerConfig;
 
 pub use builder::ServerBuilder;
 pub use error::ServerError;
@@ -17,13 +28,15 @@ pub use error::ServerError;
 pub type AuthFuture<T> = Pin<Box<dyn Future<Output = Result<T, RejectReason>> + Send>>;
 
 /// Type alias for room handler boxed future.
-pub type RoomHandlerFuture<Id> = Pin<Box<dyn Future<Output = Result<Route<Id>, RejectReason>> + Send>>;
+pub type RoomHandlerFuture<Id> =
+    Pin<Box<dyn Future<Output = Result<Route<Id>, RejectReason>> + Send>>;
 
 /// The main server struct, generic over user context type.
 pub struct Server<T: UserContext> {
     config: ServerConfig,
     auth_handler: Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>,
-    room_handler: Arc<dyn for<'a> Fn(&'a [u8], MessageContext<'a, T>) -> RoomHandlerFuture<T::Id> + Send + Sync>,
+    room_handler:
+        Arc<dyn for<'a> Fn(&'a [u8], MessageContext<'a, T>) -> RoomHandlerFuture<T::Id> + Send + Sync>,
     jwt_secret: Vec<u8>,
     _phantom: PhantomData<T>,
 }
@@ -48,7 +61,7 @@ impl Default for ServerConfig {
         Self {
             http_addr: "0.0.0.0:8080".to_string(),
             quic_addr: "0.0.0.0:4433".to_string(),
-            room_max_lifetime_secs: 3600,        // 1 hour
+            room_max_lifetime_secs: 3600,         // 1 hour
             room_first_connect_timeout_secs: 300, // 5 minutes
             room_empty_timeout_secs: 300,         // 5 minutes
         }
@@ -64,7 +77,7 @@ pub struct AuthRequest {
     pub body: Option<Vec<u8>>,
 }
 
-impl<T: UserContext> Server<T> {
+impl<T: UserContext + 'static> Server<T> {
     /// Create a new server builder.
     pub fn builder() -> ServerBuilder<T> {
         ServerBuilder::new()
@@ -72,12 +85,104 @@ impl<T: UserContext> Server<T> {
 
     /// Run the server.
     pub async fn run(self) -> Result<(), ServerError> {
-        // TODO: Implement server startup
-        // - Start HTTP server (actix-web) for REST endpoints
-        // - Start QUIC server (wtransport) for lobby + room connections
-        // - Spawn room lifecycle manager
-        tracing::info!("Server starting on HTTP {} and QUIC {}", self.config.http_addr, self.config.quic_addr);
-        
-        todo!("Server::run implementation")
+        tracing::info!(
+            "Server starting on HTTP {} and QUIC {}",
+            self.config.http_addr,
+            self.config.quic_addr
+        );
+
+        // Create shared state
+        let room_config = RoomConfig {
+            max_lifetime: Duration::from_secs(self.config.room_max_lifetime_secs),
+            first_connect_timeout: Duration::from_secs(self.config.room_first_connect_timeout_secs),
+            empty_timeout: Duration::from_secs(self.config.room_empty_timeout_secs),
+        };
+
+        let room_manager = Arc::new(RoomManager::<T>::new(room_config));
+        let ticket_manager = Arc::new(TicketManager::new(&self.jwt_secret));
+        let lobby = Arc::new(Lobby::new());
+
+        // REST state
+        let app_state = web::Data::new(AppState {
+            room_manager: Arc::clone(&room_manager),
+            ticket_manager: Arc::clone(&ticket_manager),
+            lobby: Arc::clone(&lobby),
+            auth_handler: Arc::clone(&self.auth_handler),
+        });
+
+        // QUIC state
+        let quic_state = Arc::new(QuicState {
+            room_manager: Arc::clone(&room_manager),
+            ticket_manager: Arc::clone(&ticket_manager),
+            lobby: Arc::clone(&lobby),
+            room_handler: Arc::clone(&self.room_handler),
+        });
+
+        // Spawn room lifecycle manager
+        let lifecycle_room_manager = Arc::clone(&room_manager);
+        let lifecycle_lobby = Arc::clone(&lobby);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                lifecycle_room_manager.run_lifecycle_checks(&lifecycle_lobby).await;
+            }
+        });
+
+        // Start HTTP server
+        let http_addr = self.config.http_addr.clone();
+        let http_server = HttpServer::new(move || {
+            App::new()
+                .app_data(app_state.clone())
+                .route("/ticket", web::post().to(rest::issue_ticket::<T>))
+                .route("/rooms", web::post().to(rest::create_room::<T>))
+                .route("/rooms", web::get().to(rest::list_rooms::<T>))
+                .route("/rooms/{id}", web::delete().to(rest::delete_room::<T>))
+        })
+        .bind(&http_addr)?
+        .run();
+
+        // Start QUIC server
+        let quic_addr = self.config.quic_addr.clone();
+        let quic_server = async move {
+            // Generate self-signed certificate for development
+            let identity = Identity::self_signed(["localhost", "127.0.0.1"])
+                .map_err(|e| ServerError::Quic(e.to_string()))?;
+
+            let config = WtServerConfig::builder()
+                .with_bind_address(quic_addr.parse().unwrap())
+                .with_identity(identity)
+                .build();
+
+            let endpoint = wtransport::Endpoint::server(config)
+                .map_err(|e| ServerError::Quic(e.to_string()))?;
+
+            tracing::info!("QUIC server listening");
+
+            loop {
+                let incoming = endpoint.accept().await;
+                let state = Arc::clone(&quic_state);
+
+                tokio::spawn(async move {
+                    if let Err(e) = quic::handle_session(incoming, state).await {
+                        tracing::warn!("Session error: {:?}", e);
+                    }
+                });
+            }
+
+            #[allow(unreachable_code)]
+            Ok::<(), ServerError>(())
+        };
+
+        // Run both servers
+        tokio::select! {
+            result = http_server => {
+                result.map_err(|e| ServerError::Http(e.to_string()))?;
+            }
+            result = quic_server => {
+                result?;
+            }
+        }
+
+        Ok(())
     }
 }

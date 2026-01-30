@@ -1037,6 +1037,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "wtransport",
  "xwt-core 0.9.0",
  "xwt-web-sys",
  "xwt-wtransport",

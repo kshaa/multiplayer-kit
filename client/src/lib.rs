@@ -2,7 +2,7 @@ pub mod error;
 pub mod lobby;
 pub mod room;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm_exports;
 
 pub use error::ClientError;

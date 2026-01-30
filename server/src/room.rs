@@ -1,5 +1,6 @@
 //! Room management and lifecycle.
 
+use crate::lobby::Lobby;
 use dashmap::DashMap;
 use multiplayer_kit_protocol::{RoomId, RoomInfo, UserContext};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -105,7 +106,7 @@ impl<T: UserContext> RoomManager<T> {
     }
 
     /// Run lifecycle checks (call periodically).
-    pub async fn run_lifecycle_checks(&self) {
+    pub async fn run_lifecycle_checks(&self, lobby: &Lobby) {
         let now = Instant::now();
         let mut to_remove = Vec::new();
 
@@ -136,6 +137,7 @@ impl<T: UserContext> RoomManager<T> {
 
         for room_id in to_remove {
             self.rooms.remove(&room_id);
+            lobby.notify_room_deleted(room_id);
             tracing::info!(?room_id, "Room expired and removed");
         }
     }

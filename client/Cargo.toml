@@ -28,11 +28,12 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 
 # Native support
-tokio = { version = "1", features = ["sync"], optional = true }
+tokio = { version = "1", features = ["sync", "rt"], optional = true }
+wtransport = { version = "0.6", optional = true }
 
 [features]
 default = ["native"]
-native = ["xwt-wtransport", "tokio"]
+native = ["xwt-wtransport", "tokio", "wtransport"]
 wasm = ["xwt-web-sys", "wasm-bindgen", "wasm-bindgen-futures", "js-sys"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
