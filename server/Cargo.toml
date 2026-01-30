@@ -1,0 +1,29 @@
+[package]
+name = "multiplayer-kit-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+multiplayer-kit-protocol = { path = "../protocol" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP/REST
+actix-web = "4"
+
+# QUIC/WebTransport
+wtransport = "0.6"
+
+# JWT
+jsonwebtoken = "9"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Utilities
+thiserror = "2"
+tracing = "0.1"
+dashmap = "6"
