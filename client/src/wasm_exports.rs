@@ -2,8 +2,61 @@
 //!
 //! This module is only available when compiling for WASM.
 
+use crate::ConnectionState;
 use multiplayer_kit_protocol::RoomId;
 use wasm_bindgen::prelude::*;
+
+/// Connection state as exposed to JavaScript.
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+pub struct JsConnectionState {
+    state: String,
+    reason: Option<String>,
+}
+
+#[wasm_bindgen]
+impl JsConnectionState {
+    /// Get the state name: "disconnected", "connecting", "connected", or "lost"
+    #[wasm_bindgen(getter)]
+    pub fn state(&self) -> String {
+        self.state.clone()
+    }
+
+    /// Get the disconnect reason if state is "lost"
+    #[wasm_bindgen(getter)]
+    pub fn reason(&self) -> Option<String> {
+        self.reason.clone()
+    }
+
+    /// Returns true if connected
+    #[wasm_bindgen(js_name = isConnected)]
+    pub fn is_connected(&self) -> bool {
+        self.state == "connected"
+    }
+}
+
+impl From<ConnectionState> for JsConnectionState {
+    fn from(state: ConnectionState) -> Self {
+        match state {
+            ConnectionState::Disconnected => JsConnectionState {
+                state: "disconnected".to_string(),
+                reason: None,
+            },
+            ConnectionState::Connecting => JsConnectionState {
+                state: "connecting".to_string(),
+                reason: None,
+            },
+            ConnectionState::Connected => JsConnectionState {
+                state: "connected".to_string(),
+                reason: None,
+            },
+            ConnectionState::Lost(reason) => JsConnectionState {
+                state: "lost".to_string(),
+                reason: Some(reason.to_string()),
+            },
+        }
+    }
+}
 
 /// Lobby client for JavaScript.
 #[wasm_bindgen]
@@ -19,6 +72,12 @@ impl JsLobbyClient {
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self { inner })
+    }
+
+    /// Get the current connection state.
+    #[wasm_bindgen(js_name = getState)]
+    pub fn state(&self) -> JsConnectionState {
+        self.inner.state().into()
     }
 
     /// Receive the next lobby event as a JS object.
@@ -54,6 +113,12 @@ impl JsRoomClient {
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self { inner })
+    }
+
+    /// Get the current connection state.
+    #[wasm_bindgen(js_name = getState)]
+    pub fn state(&self) -> JsConnectionState {
+        self.inner.state().into()
     }
 
     /// Send a message (as Uint8Array).
