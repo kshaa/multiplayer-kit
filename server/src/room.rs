@@ -2,11 +2,11 @@
 
 use crate::lobby::Lobby;
 use dashmap::DashMap;
-use multiplayer_kit_protocol::{RoomId, RoomInfo, UserContext};
+use multiplayer_kit_protocol::{RoomId, RoomInfo, Route, UserContext};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 
 /// Manages all active rooms.
 pub struct RoomManager<T: UserContext> {
@@ -36,7 +36,8 @@ pub struct Room<T: UserContext> {
 pub struct Participant<T: UserContext> {
     pub user: T,
     pub connected_at: Instant,
-    // Connection handle would go here
+    /// Channel to send messages to this participant.
+    pub msg_tx: mpsc::Sender<Vec<u8>>,
 }
 
 impl<T: UserContext> RoomManager<T> {
@@ -144,12 +145,13 @@ impl<T: UserContext> RoomManager<T> {
 }
 
 impl<T: UserContext> Room<T> {
-    /// Add a participant to the room.
-    pub async fn add_participant(&self, user: T) {
+    /// Add a participant to the room with their message channel.
+    pub async fn add_participant(&self, user: T, msg_tx: mpsc::Sender<Vec<u8>>) {
         let mut participants = self.participants.write().await;
         participants.push(Participant {
             user,
             connected_at: Instant::now(),
+            msg_tx,
         });
         *self.last_activity.write().await = Instant::now();
     }
@@ -161,9 +163,54 @@ impl<T: UserContext> Room<T> {
         *self.last_activity.write().await = Instant::now();
     }
 
-    /// Get current participants.
+    /// Get current participants (user data only).
     pub async fn get_participants(&self) -> Vec<T> {
         let participants = self.participants.read().await;
         participants.iter().map(|p| p.user.clone()).collect()
+    }
+
+    /// Broadcast a message according to the routing decision.
+    pub async fn broadcast(&self, payload: &[u8], sender_id: &T::Id, route: Route<T::Id>) {
+        let participants = self.participants.read().await;
+
+        match route {
+            Route::Broadcast => {
+                // Send to all except sender
+                for p in participants.iter() {
+                    if &p.user.id() != sender_id {
+                        let _ = p.msg_tx.send(payload.to_vec()).await;
+                    }
+                }
+            }
+            Route::BroadcastIncludingSelf => {
+                // Send to all including sender
+                for p in participants.iter() {
+                    let _ = p.msg_tx.send(payload.to_vec()).await;
+                }
+            }
+            Route::Only(ref ids) => {
+                // Send only to specific users
+                for p in participants.iter() {
+                    if ids.contains(&p.user.id()) {
+                        let _ = p.msg_tx.send(payload.to_vec()).await;
+                    }
+                }
+            }
+            Route::AllExcept(ref ids) => {
+                // Send to all except specific users (and sender)
+                for p in participants.iter() {
+                    if !ids.contains(&p.user.id()) && &p.user.id() != sender_id {
+                        let _ = p.msg_tx.send(payload.to_vec()).await;
+                    }
+                }
+            }
+            Route::None => {
+                // Don't forward
+            }
+        }
+
+        // Update activity timestamp
+        drop(participants);
+        *self.last_activity.write().await = Instant::now();
     }
 }

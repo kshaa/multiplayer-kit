@@ -4,7 +4,7 @@ use crate::lobby::Lobby;
 use crate::room::RoomManager;
 use crate::ticket::TicketManager;
 use crate::RoomHandlerFuture;
-use multiplayer_kit_protocol::{LobbyEvent, MessageContext, RoomId, Route, UserContext};
+use multiplayer_kit_protocol::{LobbyEvent, MessageContext, RoomId, UserContext};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use wtransport::endpoint::IncomingSession;
@@ -118,8 +118,11 @@ async fn handle_room_connection<T: UserContext>(
     let user_id = user.id();
     tracing::info!("Room client authenticated, joining room {:?}", room_id);
 
-    // Add participant to room
-    room.add_participant(user.clone()).await;
+    // Create a channel for outgoing messages to this client
+    let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
+    // Add participant to room with their message channel
+    room.add_participant(user.clone(), msg_tx).await;
 
     // Notify lobby of player count change
     if let Some(info) = state.room_manager.get_room_info(room_id) {
@@ -129,16 +132,10 @@ async fn handle_room_connection<T: UserContext>(
     // Send join confirmation
     send_stream.write_all(b"joined").await?;
 
-    // Create a channel for outgoing messages to this client
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-
-    // Store the sender for broadcasting
-    let tx = Arc::new(tx);
-
-    // Spawn task to send outgoing messages
+    // Spawn task to send outgoing messages to this client
     let send_connection = connection.clone();
     let send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = msg_rx.recv().await {
             match send_connection.open_uni().await {
                 Ok(stream) => {
                     let mut stream = match stream.await {
@@ -184,29 +181,8 @@ async fn handle_room_connection<T: UserContext>(
                             }
                         };
 
-                        // Route the message
-                        match route {
-                            Route::Broadcast => {
-                                // Send to all except sender
-                                // In a real implementation, we'd iterate room participants
-                                let _ = &tx;
-                            }
-                            Route::BroadcastIncludingSelf => {
-                                // Send to all including sender
-                                let _ = tx.send(payload.clone()).await;
-                            }
-                            Route::Only(ids) => {
-                                // Send only to specific users
-                                let _ = ids;
-                            }
-                            Route::AllExcept(ids) => {
-                                // Send to all except specific users
-                                let _ = ids;
-                            }
-                            Route::None => {
-                                // Don't forward
-                            }
-                        }
+                        // Broadcast the message according to routing decision
+                        room.broadcast(&payload, &user_id, route).await;
                     }
                     Err(_) => break,
                 }
