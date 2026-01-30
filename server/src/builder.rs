@@ -1,5 +1,6 @@
-use crate::{AuthFuture, AuthRequest, RoomHandlerFuture, Server, ServerConfig};
-use multiplayer_kit_protocol::{MessageContext, RejectReason, Route, UserContext};
+use crate::room::{ActorFactory, RoomContext};
+use crate::{AuthFuture, AuthRequest, Server, ServerConfig};
+use multiplayer_kit_protocol::{RejectReason, UserContext};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 pub struct ServerBuilder<T: UserContext> {
     config: ServerConfig,
     auth_handler: Option<Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>>,
-    room_handler: Option<Arc<dyn for<'a> Fn(&'a [u8], MessageContext<'a, T>) -> RoomHandlerFuture<T::Id> + Send + Sync>>,
+    actor_factory: Option<ActorFactory<T>>,
     jwt_secret: Option<Vec<u8>>,
     _phantom: PhantomData<T>,
 }
@@ -18,7 +19,7 @@ impl<T: UserContext> ServerBuilder<T> {
         Self {
             config: ServerConfig::default(),
             auth_handler: None,
-            room_handler: None,
+            actor_factory: None,
             jwt_secret: None,
             _phantom: PhantomData,
         }
@@ -58,26 +59,49 @@ impl<T: UserContext> ServerBuilder<T> {
         self
     }
 
-    /// Set the room message handler that validates and routes messages.
-    pub fn room_handler<F, Fut>(mut self, handler: F) -> Self
+    /// Set the room actor factory.
+    /// 
+    /// The factory is called for each new room and should return a future
+    /// that runs the room's actor loop. The actor receives events via 
+    /// `ctx.events` and sends messages via `ctx.send()`.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// .room_actor(|mut ctx| async move {
+    ///     loop {
+    ///         match ctx.events.recv().await {
+    ///             Some(RoomEvent::UserJoined(user)) => {
+    ///                 ctx.send(Outgoing::broadcast(format!("{} joined", user.name))).await;
+    ///             }
+    ///             Some(RoomEvent::Message { sender, payload }) => {
+    ///                 // Broadcast to all except sender
+    ///                 ctx.send(Outgoing::new(payload, Route::AllExcept(vec![sender.id()]))).await;
+    ///             }
+    ///             Some(RoomEvent::Shutdown) | None => break,
+    ///             _ => {}
+    ///         }
+    ///     }
+    /// })
+    /// ```
+    pub fn room_actor<F, Fut>(mut self, factory: F) -> Self
     where
-        F: for<'a> Fn(&'a [u8], MessageContext<'a, T>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Route<T::Id>, RejectReason>> + Send + 'static,
+        F: Fn(RoomContext<T>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
-        self.room_handler = Some(Arc::new(move |payload, ctx| Box::pin(handler(payload, ctx))));
+        self.actor_factory = Some(Arc::new(move |ctx| Box::pin(factory(ctx))));
         self
     }
 
     /// Build the server.
     pub fn build(self) -> Result<Server<T>, &'static str> {
         let auth_handler = self.auth_handler.ok_or("auth_handler is required")?;
-        let room_handler = self.room_handler.ok_or("room_handler is required")?;
+        let actor_factory = self.actor_factory.ok_or("room_actor is required")?;
         let jwt_secret = self.jwt_secret.ok_or("jwt_secret is required")?;
 
         Ok(Server {
             config: self.config,
             auth_handler,
-            room_handler,
+            actor_factory,
             jwt_secret,
             _phantom: PhantomData,
         })

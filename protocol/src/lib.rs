@@ -4,33 +4,55 @@ use std::hash::Hash;
 /// Trait that library users implement for their user data.
 /// This data is embedded in JWTs and available during message validation.
 pub trait UserContext: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static {
-    type Id: Eq + Hash + Clone + Send + Sync + 'static;
+    type Id: Eq + Hash + Clone + Send + Sync + 'static + std::fmt::Debug;
     fn id(&self) -> Self::Id;
 }
 
-/// Context provided to the room message handler.
-pub struct MessageContext<'a, T: UserContext> {
-    /// The user who sent this message.
-    pub sender: &'a T,
-    /// All participants currently in the room.
-    pub participants: &'a [T],
-    /// The room ID.
-    pub room_id: RoomId,
-}
-
-/// Routing decision returned by the room handler.
+/// Routing decision for outgoing messages.
 #[derive(Debug, Clone)]
 pub enum Route<Id> {
-    /// Send to all participants except the sender.
+    /// Send to all participants.
     Broadcast,
-    /// Send to all participants including the sender.
-    BroadcastIncludingSelf,
     /// Send only to these specific users.
     Only(Vec<Id>),
     /// Send to everyone except these users.
     AllExcept(Vec<Id>),
-    /// Valid message, but don't forward (e.g., ACK).
+    /// Don't send to anyone.
     None,
+}
+
+/// An outgoing message from a room actor.
+#[derive(Debug, Clone)]
+pub struct Outgoing<Id> {
+    pub payload: Vec<u8>,
+    pub route: Route<Id>,
+}
+
+impl<Id> Outgoing<Id> {
+    pub fn new(payload: impl Into<Vec<u8>>, route: Route<Id>) -> Self {
+        Self {
+            payload: payload.into(),
+            route,
+        }
+    }
+    
+    /// Broadcast to all participants.
+    pub fn broadcast(payload: impl Into<Vec<u8>>) -> Self {
+        Self::new(payload, Route::Broadcast)
+    }
+}
+
+/// Events sent to a room actor.
+#[derive(Debug, Clone)]
+pub enum RoomEvent<T: UserContext> {
+    /// A user joined the room.
+    UserJoined(T),
+    /// A user left the room.
+    UserLeft(T),
+    /// A message was received from a user.
+    Message { sender: T, payload: Vec<u8> },
+    /// Room is shutting down.
+    Shutdown,
 }
 
 /// Reason for rejecting a connection or message.

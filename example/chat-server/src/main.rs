@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo run --bin chat-server
 
-use multiplayer_kit_protocol::{RejectReason, Route, UserContext};
-use multiplayer_kit_server::{AuthRequest, Server};
+use multiplayer_kit_protocol::{Outgoing, RejectReason, RoomEvent, Route, UserContext};
+use multiplayer_kit_server::{AuthRequest, RoomContext, Server};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -69,26 +69,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("Issued ticket for user: {} (id={})", user.username, user.id);
             Ok(user)
         })
-        .room_handler(|payload, ctx| {
-            // Copy data before async block
-            let message = std::str::from_utf8(payload).map(|s| s.to_string());
+        // Room actor - runs for each room, handles events
+        .room_actor(|mut ctx: RoomContext<ChatUser>| async move {
             let room_id = ctx.room_id;
-            let username = ctx.sender.username.clone();
+            tracing::info!("[Room {:?}] Actor started", room_id);
 
-            async move {
-                let message = message
-                    .map_err(|_| RejectReason::ValidationFailed("Invalid UTF-8".into()))?;
+            loop {
+                match ctx.events.recv().await {
+                    Some(RoomEvent::UserJoined(user)) => {
+                        tracing::info!("[Room {:?}] {} joined", room_id, user.username);
+                        ctx.send(Outgoing::new(
+                            format!("*** {} joined the chat ***", user.username),
+                            Route::Broadcast,
+                        )).await;
+                    }
+                    Some(RoomEvent::UserLeft(user)) => {
+                        tracing::info!("[Room {:?}] {} left", room_id, user.username);
+                        ctx.send(Outgoing::new(
+                            format!("*** {} left the chat ***", user.username),
+                            Route::Broadcast,
+                        )).await;
+                    }
+                    Some(RoomEvent::Message { sender, payload }) => {
+                        // Validate message
+                        let message = match std::str::from_utf8(&payload) {
+                            Ok(s) if !s.is_empty() && s.len() <= 1000 => s,
+                            _ => {
+                                tracing::warn!("[Room {:?}] Invalid message from {}", room_id, sender.username);
+                                continue;
+                            }
+                        };
 
-                if message.is_empty() {
-                    return Err(RejectReason::ValidationFailed("Empty message".into()));
+                        tracing::info!("[Room {:?}] {}: {}", room_id, sender.username, message);
+
+                        // Broadcast to everyone except sender (they already see their own message)
+                        ctx.send(Outgoing::new(
+                            payload,
+                            Route::AllExcept(vec![sender.id()]),
+                        )).await;
+                    }
+                    Some(RoomEvent::Shutdown) => {
+                        tracing::info!("[Room {:?}] Shutting down", room_id);
+                        break;
+                    }
+                    None => {
+                        tracing::info!("[Room {:?}] Event channel closed", room_id);
+                        break;
+                    }
                 }
-                if message.len() > 1000 {
-                    return Err(RejectReason::ValidationFailed("Message too long".into()));
-                }
-
-                tracing::info!("[Room {:?}] {}: {}", room_id, username, message);
-                Ok(Route::BroadcastIncludingSelf)
             }
+
+            tracing::info!("[Room {:?}] Actor stopped", room_id);
         })
         .build()
         .expect("Failed to build server");

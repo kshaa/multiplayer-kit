@@ -335,8 +335,7 @@
                     }
                     
                     const msg = new TextDecoder().decode(data);
-                    const isYou = msg.startsWith(username + ':');
-                    log(msg, isYou ? 'you' : 'chat');
+                    log(msg, 'chat');
                 }
             } catch (e) {
                 if (roomTransport === transport) {
@@ -354,13 +353,17 @@
             
             if (!msg || !roomTransport) return;
             
+            const fullMsg = `${username}: ${msg}`;
+            
+            // Local echo - show immediately
+            log(fullMsg, 'you');
+            input.value = '';
+            
             try {
                 const stream = await roomTransport.createBidirectionalStream();
                 const writer = stream.writable.getWriter();
-                const fullMsg = `${username}: ${msg}`;
                 await writer.write(new TextEncoder().encode(fullMsg));
                 await writer.close();
-                input.value = '';
             } catch (e) {
                 log('Failed to send: ' + e.message, 'error');
             }

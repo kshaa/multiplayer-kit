@@ -1,6 +1,6 @@
 //! Room client for game communication.
 
-use crate::error::{ConnectionError, ConnectionState, DisconnectReason, ReceiveError, SendError};
+use crate::error::{ConnectionError, ConnectionState, DisconnectReason, SendError};
 use crate::ClientError;
 use multiplayer_kit_protocol::RoomId;
 

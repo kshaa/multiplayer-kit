@@ -305,6 +305,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Send chat message
                     if let Some(ref sender) = room_sender {
                         let message = format!("{}: {}", username, input);
+                        // Local echo - show immediately
+                        println!("{}", message);
                         if sender.send(message.into_bytes()).await.is_err() {
                             println!("Failed to send: room disconnected");
                             room_sender = None;

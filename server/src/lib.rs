@@ -9,11 +9,11 @@ pub mod ticket;
 use crate::lobby::Lobby;
 use crate::quic::QuicState;
 use crate::rest::AppState;
-use crate::room::{RoomConfig, RoomManager};
+use crate::room::{ActorFactory, RoomConfig, RoomManager};
 use crate::ticket::TicketManager;
 use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
-use multiplayer_kit_protocol::{MessageContext, RejectReason, Route, UserContext};
+use multiplayer_kit_protocol::{RejectReason, UserContext};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -25,20 +25,17 @@ use wtransport::ServerConfig as WtServerConfig;
 
 pub use builder::ServerBuilder;
 pub use error::ServerError;
+pub use multiplayer_kit_protocol::{Outgoing, RoomEvent, RoomId, Route};
+pub use room::RoomContext;
 
 /// Type alias for auth handler boxed future.
 pub type AuthFuture<T> = Pin<Box<dyn Future<Output = Result<T, RejectReason>> + Send>>;
-
-/// Type alias for room handler boxed future.
-pub type RoomHandlerFuture<Id> =
-    Pin<Box<dyn Future<Output = Result<Route<Id>, RejectReason>> + Send>>;
 
 /// The main server struct, generic over user context type.
 pub struct Server<T: UserContext> {
     config: ServerConfig,
     auth_handler: Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>,
-    room_handler:
-        Arc<dyn for<'a> Fn(&'a [u8], MessageContext<'a, T>) -> RoomHandlerFuture<T::Id> + Send + Sync>,
+    actor_factory: ActorFactory<T>,
     jwt_secret: Vec<u8>,
     _phantom: PhantomData<T>,
 }
@@ -100,7 +97,7 @@ impl<T: UserContext + 'static> Server<T> {
             empty_timeout: Duration::from_secs(self.config.room_empty_timeout_secs),
         };
 
-        let room_manager = Arc::new(RoomManager::<T>::new(room_config));
+        let room_manager = Arc::new(RoomManager::<T>::new(room_config, self.actor_factory));
         let ticket_manager = Arc::new(TicketManager::new(&self.jwt_secret));
         let lobby = Arc::new(Lobby::new());
 
@@ -142,7 +139,6 @@ impl<T: UserContext + 'static> Server<T> {
             room_manager: Arc::clone(&room_manager),
             ticket_manager: Arc::clone(&ticket_manager),
             lobby: Arc::clone(&lobby),
-            room_handler: Arc::clone(&self.room_handler),
         });
 
         // Spawn room lifecycle manager

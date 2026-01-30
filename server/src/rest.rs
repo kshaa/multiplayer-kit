@@ -161,7 +161,7 @@ pub async fn delete_room<T: UserContext>(
     };
 
     // Delete room
-    match state.room_manager.delete_room(room_id, &user.id()) {
+    match state.room_manager.delete_room(room_id, &user.id()).await {
         Ok(()) => {
             state.lobby.notify_room_deleted(room_id);
             HttpResponse::Ok().json(serde_json::json!({"deleted": true}))

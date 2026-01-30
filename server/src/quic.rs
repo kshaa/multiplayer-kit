@@ -3,8 +3,7 @@
 use crate::lobby::Lobby;
 use crate::room::RoomManager;
 use crate::ticket::TicketManager;
-use crate::RoomHandlerFuture;
-use multiplayer_kit_protocol::{LobbyEvent, MessageContext, RoomId, UserContext};
+use multiplayer_kit_protocol::{LobbyEvent, RoomId, UserContext};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use wtransport::endpoint::IncomingSession;
@@ -15,8 +14,6 @@ pub struct QuicState<T: UserContext> {
     pub room_manager: Arc<RoomManager<T>>,
     pub ticket_manager: Arc<TicketManager>,
     pub lobby: Arc<Lobby>,
-    pub room_handler:
-        Arc<dyn for<'a> Fn(&'a [u8], MessageContext<'a, T>) -> RoomHandlerFuture<T::Id> + Send + Sync>,
 }
 
 /// Handle an incoming WebTransport session.
@@ -122,11 +119,26 @@ async fn handle_room_connection<T: UserContext>(
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
 
     // Add participant to room with their message channel
+    // This will also notify the actor of the join
     room.add_participant(user.clone(), msg_tx).await;
 
     // Notify lobby of player count change
     if let Some(info) = state.room_manager.get_room_info(room_id) {
         state.lobby.notify_room_updated(info);
+    }
+
+    // Take the outbox receiver to broadcast actor messages
+    // (Only the first connection to a room will get this; others won't need it
+    // since the broadcast task will already be running)
+    if let Some(mut outbox_rx) = room.take_outbox_rx().await {
+        let room_for_broadcast = Arc::clone(&room);
+        tokio::spawn(async move {
+            while let Some(outgoing) = outbox_rx.recv().await {
+                room_for_broadcast
+                    .broadcast(&outgoing.payload, outgoing.route)
+                    .await;
+            }
+        });
     }
 
     // Send join confirmation
@@ -151,7 +163,7 @@ async fn handle_room_connection<T: UserContext>(
         }
     });
 
-    // Main receive loop
+    // Main receive loop - forward messages to actor
     loop {
         tokio::select! {
             result = connection.accept_bi() => {
@@ -162,27 +174,8 @@ async fn handle_room_connection<T: UserContext>(
                             Err(_) => continue,
                         };
 
-                        // Get current participants for context
-                        let participants = room.get_participants().await;
-
-                        let ctx = MessageContext {
-                            sender: &user,
-                            participants: &participants,
-                            room_id,
-                        };
-
-                        // Call user's room handler
-                        let route = match (state.room_handler)(&payload, ctx).await {
-                            Ok(r) => r,
-                            Err(reason) => {
-                                tracing::warn!("Message rejected: {:?}", reason);
-                                // Could kick the user here
-                                continue;
-                            }
-                        };
-
-                        // Broadcast the message according to routing decision
-                        room.broadcast(&payload, &user_id, route).await;
+                        // Send message to actor
+                        room.send_message(user.clone(), payload).await;
                     }
                     Err(_) => break,
                 }
