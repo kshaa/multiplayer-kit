@@ -135,7 +135,10 @@
         </div>
     </div>
 
-    <script>
+    <script type="module">
+        // Import the WASM module
+        import init, { JsApiClient, JsRoomClient } from './pkg/multiplayer_kit_client.js';
+        
         const SERVER_HTTP = 'http://127.0.0.1:8080';
         const SERVER_QUIC = 'https://127.0.0.1:4433';
         
@@ -143,7 +146,27 @@
         let ticket = '';
         let certHash = null;
         let currentRoomId = null;
-        let roomTransport = null;
+        let roomClient = null;
+        let api = null;
+        let wasmReady = false;
+        
+        // Initialize WASM
+        async function initWasm() {
+            try {
+                await init();
+                api = new JsApiClient(SERVER_HTTP);
+                wasmReady = true;
+                log('WASM client loaded');
+            } catch (e) {
+                log('Failed to load WASM client: ' + e.message, 'error');
+                log('Falling back to raw WebTransport...', 'system');
+            }
+        }
+        
+        // Make functions globally available
+        window.connect = connect;
+        window.createRoom = createRoom;
+        window.sendMessage = sendMessage;
         
         function log(msg, type = 'system') {
             const el = document.getElementById('log');
@@ -172,25 +195,18 @@
             document.getElementById('setupStatus').className = 'status';
             
             try {
-                const resp = await fetch(`${SERVER_HTTP}/ticket`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username })
-                });
-                
-                if (!resp.ok) {
-                    throw new Error(await resp.text());
+                if (!wasmReady) {
+                    throw new Error('WASM not loaded');
                 }
                 
-                const data = await resp.json();
-                ticket = data.ticket;
+                // Get ticket using ApiClient
+                const ticketResp = await api.getTicket({ username });
+                ticket = ticketResp.ticket;
                 
-                // Fetch cert hash for WebTransport
+                // Get cert hash for self-signed certs
                 try {
-                    const certResp = await fetch(`${SERVER_HTTP}/cert-hash`);
-                    if (certResp.ok) {
-                        const certData = await certResp.json();
-                        certHash = certData.hash;
+                    certHash = await api.getCertHash();
+                    if (certHash) {
                         log('Got server certificate hash');
                     }
                 } catch (e) {
@@ -212,8 +228,7 @@
         
         async function loadRooms() {
             try {
-                const resp = await fetch(`${SERVER_HTTP}/rooms`);
-                const rooms = await resp.json();
+                const rooms = await api.listRooms();
                 
                 const el = document.getElementById('roomsList');
                 el.innerHTML = '';
@@ -223,8 +238,8 @@
                 } else {
                     rooms.forEach(room => {
                         const div = document.createElement('div');
-                        div.className = 'room-item' + (room.id.inner === currentRoomId ? ' active' : '');
                         const roomId = room.id.inner !== undefined ? room.id.inner : room.id;
+                        div.className = 'room-item' + (roomId === currentRoomId ? ' active' : '');
                         div.innerHTML = `<span>Room ${roomId}</span><span>${room.player_count} users</span>`;
                         div.onclick = () => joinRoom(roomId);
                         el.appendChild(div);
@@ -237,22 +252,10 @@
         
         async function createRoom() {
             try {
-                const resp = await fetch(`${SERVER_HTTP}/rooms`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${ticket}`
-                    },
-                    body: JSON.stringify({})
-                });
-                
-                if (!resp.ok) throw new Error(await resp.text());
-                
-                const data = await resp.json();
-                log(`Created room ${data.room_id}`);
+                const result = await api.createRoom(ticket);
+                log(`Created room ${result.room_id}`);
                 await loadRooms();
-                await joinRoom(data.room_id);
-                
+                await joinRoom(result.room_id);
             } catch (e) {
                 log('Failed to create room: ' + e.message, 'error');
             }
@@ -261,48 +264,30 @@
         async function joinRoom(roomId) {
             if (currentRoomId === roomId) return;
             
-            if (roomTransport) {
-                roomTransport.close();
-                roomTransport = null;
+            if (roomClient) {
+                try {
+                    await roomClient.close();
+                } catch (e) {}
+                roomClient = null;
             }
             
             log(`Joining room ${roomId}...`);
             
             try {
-                // Build WebTransport options with cert hash if available
-                const options = {};
-                if (certHash) {
-                    // Decode base64 to Uint8Array
-                    const hashBytes = Uint8Array.from(atob(certHash), c => c.charCodeAt(0));
-                    options.serverCertificateHashes = [{
-                        algorithm: 'sha-256',
-                        value: hashBytes
-                    }];
-                }
+                // Use JsRoomClient with cert hash
+                roomClient = await JsRoomClient.connectWithCert(
+                    SERVER_QUIC,
+                    ticket,
+                    BigInt(roomId),
+                    certHash
+                );
                 
-                const transport = new WebTransport(`${SERVER_QUIC}/room/${roomId}`, options);
-                await transport.ready;
-                
-                // Send ticket on bidirectional stream
-                const biStream = await transport.createBidirectionalStream();
-                const writer = biStream.writable.getWriter();
-                await writer.write(new TextEncoder().encode(ticket));
-                await writer.close();
-                
-                // Wait for confirmation
-                const reader = biStream.readable.getReader();
-                const { value, done } = await reader.read();
-                if (done || !value) {
-                    throw new Error('Server rejected connection');
-                }
-                
-                roomTransport = transport;
                 currentRoomId = roomId;
                 document.getElementById('roomTitle').textContent = `#${roomId}`;
                 log(`Joined room ${roomId}!`);
                 setStatus(`In room ${roomId} as ${username}`, 'connected');
                 
-                listenForMessages(transport);
+                listenForMessages();
                 await loadRooms();
                 
             } catch (e) {
@@ -310,39 +295,21 @@
             }
         }
         
-        async function listenForMessages(transport) {
-            const reader = transport.incomingUnidirectionalStreams.getReader();
+        async function listenForMessages() {
+            const client = roomClient;
             
             try {
-                while (true) {
-                    const { value: stream, done } = await reader.read();
-                    if (done) break;
-                    
-                    const streamReader = stream.getReader();
-                    const chunks = [];
-                    
-                    while (true) {
-                        const { value, done } = await streamReader.read();
-                        if (done) break;
-                        chunks.push(value);
-                    }
-                    
-                    const data = new Uint8Array(chunks.reduce((acc, c) => acc + c.length, 0));
-                    let offset = 0;
-                    for (const chunk of chunks) {
-                        data.set(chunk, offset);
-                        offset += chunk.length;
-                    }
-                    
-                    const msg = new TextDecoder().decode(data);
+                while (roomClient === client) {
+                    const data = await client.recv();
+                    const msg = new TextDecoder().decode(new Uint8Array(data));
                     log(msg, 'chat');
                 }
             } catch (e) {
-                if (roomTransport === transport) {
-                    log('Disconnected from room', 'error');
+                if (roomClient === client) {
+                    log('Disconnected from room: ' + e.message, 'error');
                     setStatus('Disconnected', 'error');
                     currentRoomId = null;
-                    roomTransport = null;
+                    roomClient = null;
                 }
             }
         }
@@ -351,7 +318,7 @@
             const input = document.getElementById('msgInput');
             const msg = input.value.trim();
             
-            if (!msg || !roomTransport) return;
+            if (!msg || !roomClient) return;
             
             const fullMsg = `${username}: ${msg}`;
             
@@ -360,16 +327,15 @@
             input.value = '';
             
             try {
-                const stream = await roomTransport.createBidirectionalStream();
-                const writer = stream.writable.getWriter();
-                await writer.write(new TextEncoder().encode(fullMsg));
-                await writer.close();
+                await roomClient.send(new TextEncoder().encode(fullMsg));
             } catch (e) {
                 log('Failed to send: ' + e.message, 'error');
             }
         }
         
+        // Initialize
         document.getElementById('username').focus();
+        initWasm();
         setInterval(() => { if (ticket) loadRooms(); }, 5000);
     </script>
 </body>

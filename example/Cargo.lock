@@ -383,9 +383,7 @@ version = "0.1.0"
 dependencies = [
  "multiplayer-kit-client",
  "multiplayer-kit-protocol",
- "reqwest",
  "serde",
- "serde_json",
  "tokio",
 ]
 
@@ -1261,6 +1259,7 @@ dependencies = [
  "futures",
  "js-sys",
  "multiplayer-kit-protocol",
+ "reqwest",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -1271,8 +1270,6 @@ dependencies = [
  "web-sys",
  "web-wt-sys",
  "wtransport",
- "xwt-core",
- "xwt-wtransport",
 ]
 
 [[package]]
@@ -2578,8 +2575,7 @@ dependencies = [
 [[package]]
 name = "web-wt-sys"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2793e7e95a0f1564bf1e029e4f8ff397b95998fe03fa7f9dd72682f127473c68"
+source = "git+https://github.com/MOZGIII/xwt?branch=master#469c657b3abd512955cb21162198ea205c7b7234"
 dependencies = [
  "js-sys",
  "pastey",
@@ -2843,24 +2839,6 @@ dependencies = [
  "rusticata-macros",
  "thiserror",
  "time",
-]
-
-[[package]]
-name = "xwt-core"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7f8515b46b1f2da17080b50744b2c14affab6795dd8a29b56708348839576d6"
-
-[[package]]
-name = "xwt-wtransport"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75dc61d8e9645cd0011bb057eede4c5336a328f6cd1728b1f6ce069d0f187424"
-dependencies = [
- "thiserror",
- "tokio",
- "wtransport",
- "xwt-core",
 ]
 
 [[package]]

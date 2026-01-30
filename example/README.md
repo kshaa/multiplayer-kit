@@ -29,9 +29,18 @@ WebTransport at `https://127.0.0.1:4433`:
 
 ## Web Client
 
-Open `web/index.html` in a browser. You'll need to:
-1. Accept the self-signed certificate at https://127.0.0.1:4433
-2. Serve the HTML over HTTP (or use a local file server) for fetch to work
+Build the WASM client first:
+```bash
+cd /path/to/multiplayer-kit
+wasm-pack build client --target web --out-dir ../example/web/pkg -- --no-default-features --features wasm
+```
+
+Then serve the web directory:
+```bash
+npx serve example/web
+```
+
+Open `http://localhost:3000` in Chrome/Edge (WebTransport required).
 
 ## CLI Commands
 

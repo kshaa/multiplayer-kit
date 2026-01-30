@@ -160,11 +160,39 @@ mod wasm {
 
     impl LobbyClient {
         pub async fn connect(url: &str, ticket: &str) -> Result<Self, ClientError> {
+            Self::connect_with_options(url, ticket, None).await
+        }
+
+        pub async fn connect_with_options(
+            url: &str,
+            ticket: &str,
+            cert_hash_base64: Option<&str>,
+        ) -> Result<Self, ClientError> {
             let lobby_url = format!("{}/lobby", url);
 
-            let transport = wt::WebTransport::new(&lobby_url).map_err(|e| {
-                ClientError::Connection(ConnectionError::InvalidUrl(format!("{:?}", e)))
-            })?;
+            let transport = if let Some(hash_b64) = cert_hash_base64 {
+                let hash_bytes = base64_decode(hash_b64).map_err(|e| {
+                    ClientError::Connection(ConnectionError::Transport(format!(
+                        "Invalid cert hash base64: {}",
+                        e
+                    )))
+                })?;
+
+                let hash = wt::WebTransportHash::new();
+                hash.set_algorithm("sha-256");
+                hash.set_value(&hash_bytes);
+
+                let options = wt::WebTransportOptions::new();
+                options.set_server_certificate_hashes(vec![hash]);
+
+                wt::WebTransport::new_with_options(&lobby_url, &options).map_err(|e| {
+                    ClientError::Connection(ConnectionError::InvalidUrl(format!("{:?}", e)))
+                })?
+            } else {
+                wt::WebTransport::new(&lobby_url).map_err(|e| {
+                    ClientError::Connection(ConnectionError::InvalidUrl(format!("{:?}", e)))
+                })?
+            };
 
             transport.ready().await.map_err(|e| {
                 ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
@@ -299,6 +327,45 @@ mod wasm {
             self._transport.close();
             Ok(())
         }
+    }
+
+    fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+        fn decode_char(c: u8) -> Result<u8, String> {
+            if c == b'=' {
+                return Ok(0);
+            }
+            ALPHABET
+                .iter()
+                .position(|&x| x == c)
+                .map(|p| p as u8)
+                .ok_or_else(|| format!("Invalid base64 character: {}", c as char))
+        }
+
+        let input = input.trim().as_bytes();
+        let mut output = Vec::with_capacity(input.len() * 3 / 4);
+
+        for chunk in input.chunks(4) {
+            if chunk.len() < 4 {
+                return Err("Invalid base64 length".to_string());
+            }
+
+            let a = decode_char(chunk[0])?;
+            let b = decode_char(chunk[1])?;
+            let c = decode_char(chunk[2])?;
+            let d = decode_char(chunk[3])?;
+
+            output.push((a << 2) | (b >> 4));
+            if chunk[2] != b'=' {
+                output.push((b << 4) | (c >> 2));
+            }
+            if chunk[3] != b'=' {
+                output.push((c << 6) | d);
+            }
+        }
+
+        Ok(output)
     }
 }
 

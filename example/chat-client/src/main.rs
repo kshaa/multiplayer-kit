@@ -2,9 +2,9 @@
 //!
 //! Run with: cargo run --bin chat-client
 
-use multiplayer_kit_client::{LobbyClient, RoomClient};
+use multiplayer_kit_client::{ApiClient, LobbyClient, RoomClient};
 use multiplayer_kit_protocol::{LobbyEvent, RoomId, RoomInfo};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io::{self, BufRead, Write};
 use tokio::sync::mpsc;
 
@@ -14,16 +14,6 @@ const SERVER_QUIC: &str = "https://127.0.0.1:4433";
 #[derive(Serialize)]
 struct AuthRequest {
     username: String,
-}
-
-#[derive(Deserialize)]
-struct TicketResponse {
-    ticket: String,
-}
-
-#[derive(Deserialize)]
-struct CreateRoomResponse {
-    room_id: u64,
 }
 
 enum RoomEvent {
@@ -50,21 +40,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("Getting ticket...");
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{}/ticket", SERVER_HTTP))
-        .json(&AuthRequest {
+    let api = ApiClient::new(SERVER_HTTP);
+    let ticket_resp = api
+        .get_ticket(&AuthRequest {
             username: username.clone(),
         })
-        .send()
         .await?;
-
-    if !resp.status().is_success() {
-        println!("Failed to get ticket: {}", resp.text().await?);
-        return Ok(());
-    }
-
-    let ticket_resp: TicketResponse = resp.json().await?;
     let ticket = ticket_resp.ticket;
 
     println!("Got ticket!");
@@ -201,18 +182,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         "/create" => {
                             println!("Creating room...");
-                            let resp = client
-                                .post(format!("{}/rooms", SERVER_HTTP))
-                                .header("Authorization", format!("Bearer {}", ticket))
-                                .json(&serde_json::json!({}))
-                                .send()
-                                .await?;
-
-                            if resp.status().is_success() {
-                                let create_resp: CreateRoomResponse = resp.json().await?;
-                                println!("Created room {}. Join with: /join {}", create_resp.room_id, create_resp.room_id);
-                            } else {
-                                println!("Failed to create room: {}", resp.text().await?);
+                            match api.create_room(&ticket).await {
+                                Ok(create_resp) => {
+                                    println!("Created room {}. Join with: /join {}", create_resp.room_id, create_resp.room_id);
+                                }
+                                Err(e) => {
+                                    println!("Failed to create room: {}", e);
+                                }
                             }
                         }
 

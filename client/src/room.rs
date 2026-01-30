@@ -1,6 +1,6 @@
 //! Room client for game communication.
 
-use crate::error::{ConnectionError, ConnectionState, DisconnectReason, SendError};
+use crate::error::{ConnectionError, ConnectionState, DisconnectReason, ReceiveError, SendError};
 use crate::ClientError;
 use multiplayer_kit_protocol::RoomId;
 
@@ -216,18 +216,48 @@ mod wasm {
 
     pub struct RoomClient {
         transport: wt::WebTransport,
-        incoming_reader: web_sys::ReadableStreamDefaultReader,
+        incoming_reader: RefCell<web_sys::ReadableStreamDefaultReader>,
         state: Rc<RefCell<ConnectionState>>,
         _room_id: RoomId,
     }
 
     impl RoomClient {
         pub async fn connect(url: &str, ticket: &str, room_id: RoomId) -> Result<Self, ClientError> {
+            Self::connect_with_options(url, ticket, room_id, None).await
+        }
+
+        pub async fn connect_with_options(
+            url: &str,
+            ticket: &str,
+            room_id: RoomId,
+            cert_hash_base64: Option<&str>,
+        ) -> Result<Self, ClientError> {
             let room_url = format!("{}/room/{}", url, room_id.0);
 
-            let transport = wt::WebTransport::new(&room_url).map_err(|e| {
-                ClientError::Connection(ConnectionError::InvalidUrl(format!("{:?}", e)))
-            })?;
+            let transport = if let Some(hash_b64) = cert_hash_base64 {
+                // Decode base64 to bytes
+                let hash_bytes = base64_decode(hash_b64).map_err(|e| {
+                    ClientError::Connection(ConnectionError::Transport(format!(
+                        "Invalid cert hash base64: {}",
+                        e
+                    )))
+                })?;
+
+                let hash = wt::WebTransportHash::new();
+                hash.set_algorithm("sha-256");
+                hash.set_value(&hash_bytes);
+
+                let options = wt::WebTransportOptions::new();
+                options.set_server_certificate_hashes(vec![hash]);
+
+                wt::WebTransport::new_with_options(&room_url, &options).map_err(|e| {
+                    ClientError::Connection(ConnectionError::InvalidUrl(format!("{:?}", e)))
+                })?
+            } else {
+                wt::WebTransport::new(&room_url).map_err(|e| {
+                    ClientError::Connection(ConnectionError::InvalidUrl(format!("{:?}", e)))
+                })?
+            };
 
             transport.ready().await.map_err(|e| {
                 ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
@@ -282,7 +312,7 @@ mod wasm {
 
             Ok(Self {
                 transport,
-                incoming_reader,
+                incoming_reader: RefCell::new(incoming_reader),
                 state: Rc::new(RefCell::new(ConnectionState::Connected)),
                 _room_id: room_id,
             })
@@ -324,18 +354,17 @@ mod wasm {
             Ok(())
         }
 
-        pub async fn recv(&mut self) -> Result<Vec<u8>, ClientError> {
+        pub async fn recv(&self) -> Result<Vec<u8>, ClientError> {
             if !self.state.borrow().is_connected() {
                 return Err(ClientError::Receive(ReceiveError::NotConnected));
             }
 
-            let result = JsFuture::from(self.incoming_reader.read())
-                .await
-                .map_err(|e| {
-                    *self.state.borrow_mut() =
-                        ConnectionState::Lost(DisconnectReason::NetworkError(format!("{:?}", e)));
-                    ClientError::Receive(ReceiveError::Stream(format!("{:?}", e)))
-                })?;
+            let read_promise = self.incoming_reader.borrow().read();
+            let result = JsFuture::from(read_promise).await.map_err(|e| {
+                *self.state.borrow_mut() =
+                    ConnectionState::Lost(DisconnectReason::NetworkError(format!("{:?}", e)));
+                ClientError::Receive(ReceiveError::Stream(format!("{:?}", e)))
+            })?;
 
             let result_obj: js_sys::Object = result.unchecked_into();
             let done = js_sys::Reflect::get(&result_obj, &"done".into())
@@ -389,6 +418,46 @@ mod wasm {
             self.transport.close();
             Ok(())
         }
+    }
+
+    fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+        // Simple base64 decoder for WASM (no external dep needed)
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+        fn decode_char(c: u8) -> Result<u8, String> {
+            if c == b'=' {
+                return Ok(0);
+            }
+            ALPHABET
+                .iter()
+                .position(|&x| x == c)
+                .map(|p| p as u8)
+                .ok_or_else(|| format!("Invalid base64 character: {}", c as char))
+        }
+
+        let input = input.trim().as_bytes();
+        let mut output = Vec::with_capacity(input.len() * 3 / 4);
+
+        for chunk in input.chunks(4) {
+            if chunk.len() < 4 {
+                return Err("Invalid base64 length".to_string());
+            }
+
+            let a = decode_char(chunk[0])?;
+            let b = decode_char(chunk[1])?;
+            let c = decode_char(chunk[2])?;
+            let d = decode_char(chunk[3])?;
+
+            output.push((a << 2) | (b >> 4));
+            if chunk[2] != b'=' {
+                output.push((b << 4) | (c >> 2));
+            }
+            if chunk[3] != b'=' {
+                output.push((c << 6) | d);
+            }
+        }
+
+        Ok(output)
     }
 }
 
