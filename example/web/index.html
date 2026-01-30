@@ -141,6 +141,7 @@
         
         let username = '';
         let ticket = '';
+        let certHash = null;
         let currentRoomId = null;
         let roomTransport = null;
         
@@ -183,6 +184,18 @@
                 
                 const data = await resp.json();
                 ticket = data.ticket;
+                
+                // Fetch cert hash for WebTransport
+                try {
+                    const certResp = await fetch(`${SERVER_HTTP}/cert-hash`);
+                    if (certResp.ok) {
+                        const certData = await certResp.json();
+                        certHash = certData.hash;
+                        log('Got server certificate hash');
+                    }
+                } catch (e) {
+                    log('Warning: Could not fetch cert hash: ' + e.message, 'error');
+                }
                 
                 document.getElementById('setup').classList.add('hidden');
                 document.getElementById('app').classList.remove('hidden');
@@ -256,7 +269,18 @@
             log(`Joining room ${roomId}...`);
             
             try {
-                const transport = new WebTransport(`${SERVER_QUIC}/room/${roomId}`);
+                // Build WebTransport options with cert hash if available
+                const options = {};
+                if (certHash) {
+                    // Decode base64 to Uint8Array
+                    const hashBytes = Uint8Array.from(atob(certHash), c => c.charCodeAt(0));
+                    options.serverCertificateHashes = [{
+                        algorithm: 'sha-256',
+                        value: hashBytes
+                    }];
+                }
+                
+                const transport = new WebTransport(`${SERVER_QUIC}/room/${roomId}`, options);
                 await transport.ready;
                 
                 // Send ticket on bidirectional stream

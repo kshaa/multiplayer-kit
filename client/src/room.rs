@@ -33,7 +33,10 @@ mod native {
         pub async fn connect(url: &str, ticket: &str, room_id: RoomId) -> Result<Self, ClientError> {
             let config = wtransport::ClientConfig::builder()
                 .with_bind_default()
-                .with_native_certs()
+                .with_no_cert_validation()
+                .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
+                .max_idle_timeout(Some(std::time::Duration::from_secs(30)))
+                .expect("valid idle timeout")
                 .build();
 
             let endpoint = wtransport::Endpoint::client(config).map_err(|e| {

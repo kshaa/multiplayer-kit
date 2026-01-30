@@ -24,6 +24,7 @@ cargo run --bin chat-client
 | DELETE | `/rooms/{id}` | Delete room |
 
 WebTransport at `https://127.0.0.1:4433`:
+- `/lobby` - Live room list updates
 - `/room/{id}` - Join room chat
 
 ## Web Client

@@ -15,6 +15,7 @@ pub struct AppState<T: UserContext> {
     pub ticket_manager: Arc<TicketManager>,
     pub lobby: Arc<Lobby>,
     pub auth_handler: Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>,
+    pub cert_hash: Arc<tokio::sync::RwLock<Option<String>>>,
 }
 
 #[derive(Deserialize)]
@@ -175,4 +176,15 @@ pub async fn delete_room<T: UserContext>(
 pub async fn list_rooms<T: UserContext>(state: web::Data<AppState<T>>) -> HttpResponse {
     let rooms = state.room_manager.get_all_rooms();
     HttpResponse::Ok().json(rooms)
+}
+
+/// GET /cert-hash - Get the server's certificate hash for WebTransport.
+pub async fn get_cert_hash<T: UserContext>(state: web::Data<AppState<T>>) -> HttpResponse {
+    let hash = state.cert_hash.read().await;
+    match hash.as_ref() {
+        Some(h) => HttpResponse::Ok().json(serde_json::json!({ "hash": h })),
+        None => HttpResponse::ServiceUnavailable().json(ErrorResponse {
+            error: "Certificate hash not yet available".to_string(),
+        }),
+    }
 }

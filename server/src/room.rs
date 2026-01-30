@@ -3,7 +3,7 @@
 use crate::lobby::Lobby;
 use dashmap::DashMap;
 use multiplayer_kit_protocol::{RoomId, RoomInfo, Route, UserContext};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
@@ -29,6 +29,7 @@ pub struct Room<T: UserContext> {
     pub created_at: Instant,
     pub metadata: Option<serde_json::Value>,
     participants: RwLock<Vec<Participant<T>>>,
+    participant_count: AtomicU32,
     last_activity: RwLock<Instant>,
 }
 
@@ -58,6 +59,7 @@ impl<T: UserContext> RoomManager<T> {
             created_at: Instant::now(),
             metadata,
             participants: RwLock::new(Vec::new()),
+            participant_count: AtomicU32::new(0),
             last_activity: RwLock::new(Instant::now()),
         });
         self.rooms.insert(id, room);
@@ -81,15 +83,12 @@ impl<T: UserContext> RoomManager<T> {
 
     /// Get room info for lobby.
     pub fn get_room_info(&self, room_id: RoomId) -> Option<RoomInfo> {
-        self.rooms.get(&room_id).map(|room| {
-            let participants = room.participants.blocking_read();
-            RoomInfo {
-                id: room.id,
-                player_count: participants.len() as u32,
-                max_players: None,
-                created_at: room.created_at.elapsed().as_secs(),
-                metadata: room.metadata.clone(),
-            }
+        self.rooms.get(&room_id).map(|room| RoomInfo {
+            id: room.id,
+            player_count: room.participant_count.load(Ordering::Relaxed),
+            max_players: None,
+            created_at: room.created_at.elapsed().as_secs(),
+            metadata: room.metadata.clone(),
         })
     }
 
@@ -153,13 +152,19 @@ impl<T: UserContext> Room<T> {
             connected_at: Instant::now(),
             msg_tx,
         });
+        self.participant_count.fetch_add(1, Ordering::Relaxed);
         *self.last_activity.write().await = Instant::now();
     }
 
     /// Remove a participant from the room.
     pub async fn remove_participant(&self, user_id: &T::Id) {
         let mut participants = self.participants.write().await;
+        let old_len = participants.len();
         participants.retain(|p| &p.user.id() != user_id);
+        let removed = old_len - participants.len();
+        if removed > 0 {
+            self.participant_count.fetch_sub(removed as u32, Ordering::Relaxed);
+        }
         *self.last_activity.write().await = Instant::now();
     }
 

@@ -29,7 +29,7 @@ js-sys = { version = "0.3", optional = true }
 
 # Native support
 tokio = { version = "1", features = ["sync", "rt"], optional = true }
-wtransport = { version = "0.6", optional = true }
+wtransport = { version = "0.6", features = ["dangerous-configuration"], optional = true }
 
 [features]
 default = ["native"]

@@ -11,6 +11,7 @@ tokio = { version = "1", features = ["full"] }
 
 # HTTP/REST
 actix-web = "4"
+actix-cors = "0.7"
 
 # QUIC/WebTransport
 wtransport = "0.6"
@@ -27,3 +28,4 @@ bincode = "1"
 thiserror = "2"
 tracing = "0.1"
 dashmap = "6"
+base64 = "0.22.1"
