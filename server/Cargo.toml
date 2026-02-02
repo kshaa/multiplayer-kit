@@ -9,12 +9,17 @@ multiplayer-kit-protocol = { path = "../protocol" }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# HTTP/REST
+# HTTP/REST/WebSocket
 actix-web = "4"
 actix-cors = "0.7"
+actix-web-actors = "4"
+actix = "0.13"
 
 # QUIC/WebTransport
 wtransport = "0.6"
+
+# WebSocket
+tokio-tungstenite = "0.26"
 
 # JWT
 jsonwebtoken = "9"

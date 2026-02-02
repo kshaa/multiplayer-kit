@@ -72,6 +72,7 @@ pub enum RejectReason {
 
 /// Unique identifier for a room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct RoomId(pub u64);
 
 /// Room metadata broadcast via lobby.

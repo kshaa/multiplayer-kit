@@ -29,7 +29,6 @@ impl JsApiClient {
     /// Request a ticket from the server. Pass your auth payload as a JS object.
     #[wasm_bindgen(js_name = getTicket)]
     pub async fn get_ticket(&self, auth_payload: JsValue) -> Result<JsValue, JsError> {
-        // Convert JsValue to serde_json::Value
         let payload: serde_json::Value = serde_wasm_bindgen::from_value(auth_payload)
             .map_err(|e| JsError::new(&e.to_string()))?;
 
@@ -43,7 +42,6 @@ impl JsApiClient {
     }
 
     /// Get the server's certificate hash (base64 SHA-256) for self-signed certs.
-    /// Returns null if not available.
     #[wasm_bindgen(js_name = getCertHash)]
     pub async fn get_cert_hash(&self) -> Result<Option<String>, JsError> {
         self.inner
@@ -78,9 +76,9 @@ impl JsApiClient {
 
     /// Delete a room.
     #[wasm_bindgen(js_name = deleteRoom)]
-    pub async fn delete_room(&self, ticket: &str, room_id: u64) -> Result<(), JsError> {
+    pub async fn delete_room(&self, ticket: &str, room_id: u32) -> Result<(), JsError> {
         self.inner
-            .delete_room(ticket, RoomId(room_id))
+            .delete_room(ticket, RoomId(room_id as u64))
             .await
             .map_err(|e| JsError::new(&e.to_string()))
     }
@@ -100,19 +98,16 @@ pub struct JsConnectionState {
 
 #[wasm_bindgen]
 impl JsConnectionState {
-    /// Get the state name: "disconnected", "connecting", "connected", or "lost"
     #[wasm_bindgen(getter)]
     pub fn state(&self) -> String {
         self.state.clone()
     }
 
-    /// Get the disconnect reason if state is "lost"
     #[wasm_bindgen(getter)]
     pub fn reason(&self) -> Option<String> {
         self.reason.clone()
     }
 
-    /// Returns true if connected
     #[wasm_bindgen(js_name = isConnected)]
     pub fn is_connected(&self) -> bool {
         self.state == "connected"
@@ -142,21 +137,151 @@ impl From<ConnectionState> for JsConnectionState {
     }
 }
 
+// ============================================================================
+// JsRoomConnection
+// ============================================================================
+
+/// Room connection for JavaScript.
+#[wasm_bindgen]
+pub struct JsRoomConnection {
+    inner: crate::RoomConnection,
+}
+
+#[wasm_bindgen]
+impl JsRoomConnection {
+    /// Connect to a room using WebTransport.
+    pub async fn connect(
+        url: &str,
+        ticket: &str,
+        room_id: u32,
+    ) -> Result<JsRoomConnection, JsError> {
+        Self::connect_with_options(url, ticket, room_id, None, false).await
+    }
+
+    /// Connect to a room with options.
+    /// - cert_hash: Base64 SHA-256 hash for self-signed certs (WebTransport only)
+    /// - use_websocket: If true, use WebSocket instead of WebTransport
+    #[wasm_bindgen(js_name = connectWithOptions)]
+    pub async fn connect_with_options(
+        url: &str,
+        ticket: &str,
+        room_id: u32,
+        cert_hash: Option<String>,
+        use_websocket: bool,
+    ) -> Result<JsRoomConnection, JsError> {
+        let config = crate::ConnectionConfig {
+            transport: if use_websocket {
+                crate::Transport::WebSocket
+            } else {
+                crate::Transport::WebTransport
+            },
+            cert_hash,
+        };
+
+        let inner = crate::RoomConnection::connect_with_config(url, ticket, RoomId(room_id as u64), config)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        Ok(JsRoomConnection { inner })
+    }
+
+    /// Open a new channel (persistent stream).
+    #[wasm_bindgen(js_name = openChannel)]
+    pub async fn open_channel(&self) -> Result<JsChannel, JsError> {
+        let channel = self
+            .inner
+            .open_channel()
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        Ok(JsChannel { inner: channel })
+    }
+
+    /// Get the transport type ("webtransport" or "websocket").
+    #[wasm_bindgen(getter)]
+    pub fn transport(&self) -> String {
+        match self.inner.transport() {
+            crate::Transport::WebTransport => "webtransport".to_string(),
+            crate::Transport::WebSocket => "websocket".to_string(),
+        }
+    }
+
+    /// Get the room ID.
+    #[wasm_bindgen(getter, js_name = roomId)]
+    pub fn room_id(&self) -> u64 {
+        self.inner.room_id().0
+    }
+
+    /// Check if connected.
+    #[wasm_bindgen(js_name = isConnected)]
+    pub fn is_connected(&self) -> bool {
+        self.inner.is_connected()
+    }
+}
+
+// ============================================================================
+// JsChannel
+// ============================================================================
+
+/// A persistent channel for JavaScript.
+#[wasm_bindgen]
+pub struct JsChannel {
+    inner: crate::Channel,
+}
+
+#[wasm_bindgen]
+impl JsChannel {
+    /// Write data to the channel.
+    pub async fn write(&self, data: &[u8]) -> Result<(), JsError> {
+        self.inner
+            .write(data)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Read data from the channel. Returns Uint8Array.
+    pub async fn read(&self) -> Result<Vec<u8>, JsError> {
+        let mut buf = vec![0u8; 64 * 1024];
+        let n = self
+            .inner
+            .read(&mut buf)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+
+    /// Check if connected.
+    #[wasm_bindgen(js_name = isConnected)]
+    pub fn is_connected(&self) -> bool {
+        self.inner.is_connected()
+    }
+
+    /// Close the channel.
+    pub async fn close(self) -> Result<(), JsError> {
+        self.inner
+            .close()
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+// ============================================================================
+// Lobby
+// ============================================================================
+
 /// Lobby client for JavaScript.
 #[wasm_bindgen]
 pub struct JsLobbyClient {
-    inner: crate::LobbyClient,
+    inner: std::rc::Rc<std::cell::RefCell<crate::LobbyClient>>,
 }
 
 #[wasm_bindgen]
 impl JsLobbyClient {
-    /// Connect to the lobby. Use `JsLobbyClient.connect(url, ticket)` instead of `new`.
     pub async fn connect(url: &str, ticket: &str) -> Result<JsLobbyClient, JsError> {
         Self::connect_with_cert(url, ticket, None).await
     }
 
-    /// Connect to the lobby with an optional certificate hash (base64-encoded SHA-256).
-    /// Use this for self-signed certificates in development.
     #[wasm_bindgen(js_name = connectWithCert)]
     pub async fn connect_with_cert(
         url: &str,
@@ -167,94 +292,121 @@ impl JsLobbyClient {
             crate::LobbyClient::connect_with_options(url, ticket, cert_hash_base64.as_deref())
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: std::rc::Rc::new(std::cell::RefCell::new(inner)),
+        })
     }
 
-    /// Get the current connection state.
     #[wasm_bindgen(js_name = getState)]
     pub fn state(&self) -> JsConnectionState {
-        self.inner.state().into()
+        self.inner.borrow().state().into()
     }
 
-    /// Receive the next lobby event as a JS object.
-    pub async fn recv(&mut self) -> Result<JsValue, JsError> {
+    pub async fn recv(&self) -> Result<JsValue, JsError> {
         let event = self
             .inner
+            .borrow_mut()
             .recv()
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         serde_wasm_bindgen::to_value(&event).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Close the connection.
     pub async fn close(self) -> Result<(), JsError> {
-        self.inner
+        let inner = std::rc::Rc::try_unwrap(self.inner)
+            .map_err(|_| JsError::new("Cannot close: lobby client has multiple references"))?
+            .into_inner();
+        inner
             .close()
             .await
             .map_err(|e| JsError::new(&e.to_string()))
     }
 }
 
-/// Room client for JavaScript.
+// ============================================================================
+// Deprecated - keep for backwards compat
+// ============================================================================
+
+/// DEPRECATED: Use JsRoomConnection + JsChannel instead.
 #[wasm_bindgen]
+#[deprecated(note = "Use JsRoomConnection and JsChannel instead")]
 pub struct JsRoomClient {
-    inner: crate::RoomClient,
+    connection: Option<crate::RoomConnection>,
+    channel: Option<crate::Channel>,
 }
 
 #[wasm_bindgen]
+#[allow(deprecated)]
 impl JsRoomClient {
-    /// Connect to a room. Use `JsRoomClient.connect(url, ticket, roomId)` instead of `new`.
-    pub async fn connect(url: &str, ticket: &str, room_id: u64) -> Result<JsRoomClient, JsError> {
+    pub async fn connect(url: &str, ticket: &str, room_id: u32) -> Result<JsRoomClient, JsError> {
         Self::connect_with_cert(url, ticket, room_id, None).await
     }
 
-    /// Connect to a room with an optional certificate hash (base64-encoded SHA-256).
-    /// Use this for self-signed certificates in development.
     #[wasm_bindgen(js_name = connectWithCert)]
     pub async fn connect_with_cert(
         url: &str,
         ticket: &str,
-        room_id: u64,
+        room_id: u32,
         cert_hash_base64: Option<String>,
     ) -> Result<JsRoomClient, JsError> {
-        let inner = crate::RoomClient::connect_with_options(
-            url,
-            ticket,
-            RoomId(room_id),
-            cert_hash_base64.as_deref(),
-        )
-        .await
-        .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Self { inner })
+        let config = crate::ConnectionConfig {
+            transport: crate::Transport::WebTransport,
+            cert_hash: cert_hash_base64,
+        };
+
+        let conn = crate::RoomConnection::connect_with_config(url, ticket, RoomId(room_id as u64), config)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        let channel = conn
+            .open_channel()
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        Ok(JsRoomClient {
+            connection: Some(conn),
+            channel: Some(channel),
+        })
     }
 
-    /// Get the current connection state.
     #[wasm_bindgen(js_name = getState)]
     pub fn state(&self) -> JsConnectionState {
-        self.inner.state().into()
+        if self.channel.as_ref().map(|c| c.is_connected()).unwrap_or(false) {
+            JsConnectionState {
+                state: "connected".to_string(),
+                reason: None,
+            }
+        } else {
+            JsConnectionState {
+                state: "disconnected".to_string(),
+                reason: None,
+            }
+        }
     }
 
-    /// Send a message (as Uint8Array).
     pub async fn send(&self, payload: &[u8]) -> Result<(), JsError> {
-        self.inner
-            .send(payload)
+        let channel = self.channel.as_ref().ok_or_else(|| JsError::new("Not connected"))?;
+        channel
+            .write(payload)
             .await
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Receive the next message (as Uint8Array).
     pub async fn recv(&self) -> Result<Vec<u8>, JsError> {
-        self.inner
-            .recv()
+        let channel = self.channel.as_ref().ok_or_else(|| JsError::new("Not connected"))?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let n = channel
+            .read(&mut buf)
             .await
-            .map_err(|e| JsError::new(&e.to_string()))
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        buf.truncate(n);
+        Ok(buf)
     }
 
-    /// Close the connection.
     pub async fn close(self) -> Result<(), JsError> {
-        self.inner
-            .close()
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))
+        if let Some(channel) = self.channel {
+            channel.close().await.map_err(|e| JsError::new(&e.to_string()))?;
+        }
+        Ok(())
     }
 }

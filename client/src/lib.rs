@@ -11,4 +11,8 @@ pub use error::{
     ClientError, ConnectionError, ConnectionState, DisconnectReason, ReceiveError, SendError,
 };
 pub use lobby::LobbyClient;
+pub use room::{Channel, ConnectionConfig, RoomConnection, Transport};
+
+// Deprecated alias
+#[allow(deprecated)]
 pub use room::RoomClient;

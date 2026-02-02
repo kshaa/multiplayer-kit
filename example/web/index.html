@@ -3,340 +3,426 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat - multiplayer-kit demo</title>
+    <title>Chat</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --bg: #0f0f0f;
+            --fg: #e0e0e0;
+            --accent: #00ff9f;
+            --surface: #1a1a1a;
+            --border: #333;
+            --muted: #666;
+        }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
         body {
-            font-family: 'Courier New', monospace;
-            background: #1a1a2e;
-            color: #eee;
+            font-family: "JetBrains Mono", "SF Mono", "Consolas", monospace;
+            background: var(--bg);
+            color: var(--fg);
             height: 100vh;
             display: flex;
             flex-direction: column;
-            padding: 20px;
+            padding: 1rem;
         }
-        h1 { color: #00d9ff; margin-bottom: 10px; }
+        h1 {
+            color: var(--accent);
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            font-weight: 400;
+        }
         .container {
-            display: flex;
-            gap: 20px;
             flex: 1;
-            min-height: 0;
-        }
-        .panel {
-            background: #16213e;
-            border: 1px solid #0f3460;
-            border-radius: 8px;
-            padding: 15px;
             display: flex;
             flex-direction: column;
+            max-width: 800px;
+            width: 100%;
+            margin: 0 auto;
         }
-        .panel h2 {
-            color: #00d9ff;
-            font-size: 14px;
-            margin-bottom: 10px;
-            text-transform: uppercase;
+        .setup {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            padding: 1rem;
+            border-radius: 4px;
+            margin-bottom: 1rem;
         }
-        .sidebar { width: 250px; }
-        .main { flex: 1; }
-        #log {
+        .setup input {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--fg);
+            padding: 0.5rem;
+            font-family: inherit;
+            font-size: 0.9rem;
+            width: 200px;
+            margin-right: 0.5rem;
+            border-radius: 2px;
+        }
+        .setup button, .actions button {
+            background: var(--accent);
+            color: var(--bg);
+            border: none;
+            padding: 0.5rem 1rem;
+            font-family: inherit;
+            font-size: 0.9rem;
+            cursor: pointer;
+            font-weight: 500;
+            border-radius: 2px;
+            margin-right: 0.5rem;
+        }
+        .setup button:hover, .actions button:hover {
+            opacity: 0.9;
+        }
+        .setup button:disabled, .actions button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .chat {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .messages {
             flex: 1;
             overflow-y: auto;
-            font-size: 13px;
-            line-height: 1.5;
-            padding: 10px;
-            background: #0f0f1a;
-            border-radius: 4px;
-            margin-bottom: 10px;
+            padding: 1rem;
+            font-size: 0.9rem;
+            line-height: 1.6;
         }
-        #log .system { color: #888; }
-        #log .error { color: #ff6b6b; }
-        #log .chat { color: #eee; }
-        #log .you { color: #00d9ff; }
+        .messages .msg {
+            margin-bottom: 0.5rem;
+        }
+        .messages .msg.system {
+            color: var(--muted);
+            font-style: italic;
+        }
+        .messages .msg.self {
+            color: var(--accent);
+        }
         .input-row {
             display: flex;
-            gap: 10px;
+            border-top: 1px solid var(--border);
         }
-        input, button {
-            font-family: inherit;
-            font-size: 14px;
-            padding: 10px;
+        .input-row input {
+            flex: 1;
+            background: var(--bg);
             border: none;
-            border-radius: 4px;
+            color: var(--fg);
+            padding: 1rem;
+            font-family: inherit;
+            font-size: 0.9rem;
         }
-        input {
-            flex: 1;
-            background: #0f0f1a;
-            color: #eee;
-            border: 1px solid #0f3460;
+        .input-row input:focus {
+            outline: none;
         }
-        input:focus { outline: none; border-color: #00d9ff; }
-        button {
-            background: #00d9ff;
-            color: #1a1a2e;
+        .input-row button {
+            background: var(--accent);
+            color: var(--bg);
+            border: none;
+            padding: 1rem 1.5rem;
+            font-family: inherit;
+            font-size: 0.9rem;
             cursor: pointer;
-            font-weight: bold;
+            font-weight: 500;
         }
-        button:hover { background: #00b8d9; }
-        button:disabled { background: #555; cursor: not-allowed; }
-        .rooms-list {
-            flex: 1;
-            overflow-y: auto;
-        }
-        .room-item {
-            padding: 10px;
-            background: #0f0f1a;
-            margin-bottom: 5px;
-            border-radius: 4px;
-            cursor: pointer;
+        .actions {
+            padding: 0.5rem 1rem;
+            border-bottom: 1px solid var(--border);
             display: flex;
-            justify-content: space-between;
+            align-items: center;
+            gap: 0.5rem;
         }
-        .room-item:hover { background: #1a1a3e; }
-        .room-item.active { border-left: 3px solid #00d9ff; }
-        .status { font-size: 12px; color: #888; margin-bottom: 15px; }
-        .status.connected { color: #4caf50; }
-        .status.error { color: #ff6b6b; }
-        #setup { 
-            max-width: 400px; 
-            margin: 50px auto;
+        .actions select {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--fg);
+            padding: 0.5rem;
+            font-family: inherit;
+            font-size: 0.9rem;
+            border-radius: 2px;
         }
-        #setup input { width: 100%; margin-bottom: 10px; }
-        #setup button { width: 100%; }
-        .hidden { display: none !important; }
+        .status {
+            margin-left: auto;
+            font-size: 0.8rem;
+            color: var(--muted);
+        }
+        .status.connected {
+            color: var(--accent);
+        }
     </style>
 </head>
 <body>
-    <!-- Setup Screen -->
-    <div id="setup" class="panel">
-        <h2>Join Chat</h2>
-        <input type="text" id="username" placeholder="Enter username..." maxlength="32">
-        <button id="connectBtn" onclick="connect()">Connect</button>
-        <div id="setupStatus" class="status"></div>
-    </div>
+    <div class="container">
+        <h1>chat://</h1>
 
-    <!-- Main Chat Screen -->
-    <div id="app" class="hidden">
-        <h1>Chat Demo</h1>
-        <div id="statusBar" class="status">Disconnected</div>
-        <div class="container">
-            <div class="panel sidebar">
-                <h2>Rooms</h2>
-                <button onclick="createRoom()" style="margin-bottom:10px;width:100%">+ Create Room</button>
-                <div id="roomsList" class="rooms-list"></div>
+        <div class="setup">
+            <input type="text" id="username" placeholder="username" autofocus>
+            <button id="connectBtn" onclick="authenticate()">connect</button>
+        </div>
+
+        <div class="chat" style="display: none;">
+            <div class="actions">
+                <select id="roomSelect">
+                    <option value="">-- select room --</option>
+                </select>
+                <button onclick="createRoom()">new room</button>
+                <button onclick="joinRoom()">join</button>
+                <button onclick="leaveRoom()">leave</button>
+                <span id="status" class="status">disconnected</span>
             </div>
-            <div class="panel main">
-                <h2>Chat <span id="roomTitle"></span></h2>
-                <div id="log"></div>
-                <div class="input-row">
-                    <input type="text" id="msgInput" placeholder="Type a message..." onkeypress="if(event.key==='Enter')sendMessage()">
-                    <button onclick="sendMessage()">Send</button>
-                </div>
+            <div class="messages" id="messages"></div>
+            <div class="input-row">
+                <input type="text" id="messageInput" placeholder="type a message..." onkeydown="if(event.key==='Enter')sendMessage()">
+                <button onclick="sendMessage()">send</button>
             </div>
         </div>
     </div>
 
     <script type="module">
-        // Import the WASM module
-        import init, { JsApiClient, JsRoomClient } from './pkg/multiplayer_kit_client.js';
-        
-        const SERVER_HTTP = 'http://127.0.0.1:8080';
+        import init, { JsApiClient, JsRoomConnection, JsChannel } from './pkg/multiplayer_kit_client.js';
+
+        const SERVER = 'http://127.0.0.1:8080';
         const SERVER_QUIC = 'https://127.0.0.1:4433';
-        
-        let username = '';
-        let ticket = '';
-        let certHash = null;
-        let currentRoomId = null;
-        let roomClient = null;
+
         let api = null;
-        let wasmReady = false;
-        
-        // Initialize WASM
-        async function initWasm() {
-            try {
-                await init();
-                api = new JsApiClient(SERVER_HTTP);
-                wasmReady = true;
-                log('WASM client loaded');
-            } catch (e) {
-                log('Failed to load WASM client: ' + e.message, 'error');
-                log('Falling back to raw WebTransport...', 'system');
-            }
-        }
-        
-        // Make functions globally available
-        window.connect = connect;
+        let ticket = null;
+        let username = null;
+        let certHash = null;
+        let roomConnection = null;
+        let chatChannel = null;
+        let inRoom = false;
+
+        // Make functions available globally
+        window.authenticate = authenticate;
         window.createRoom = createRoom;
+        window.joinRoom = joinRoom;
+        window.leaveRoom = leaveRoom;
         window.sendMessage = sendMessage;
-        
-        function log(msg, type = 'system') {
-            const el = document.getElementById('log');
+
+        // Initialize WASM
+        await init();
+        api = new JsApiClient(SERVER);
+
+        function log(msg, isSystem = false, isSelf = false) {
+            const el = document.getElementById('messages');
             const div = document.createElement('div');
-            div.className = type;
+            div.className = 'msg' + (isSystem ? ' system' : '') + (isSelf ? ' self' : '');
             div.textContent = msg;
             el.appendChild(div);
             el.scrollTop = el.scrollHeight;
         }
-        
-        function setStatus(msg, type = '') {
-            const el = document.getElementById('statusBar');
-            el.textContent = msg;
-            el.className = 'status ' + type;
+
+        function setStatus(text, connected = false) {
+            const el = document.getElementById('status');
+            el.textContent = text;
+            el.className = 'status' + (connected ? ' connected' : '');
         }
-        
-        async function connect() {
+
+        async function authenticate() {
             username = document.getElementById('username').value.trim();
             if (!username) {
-                document.getElementById('setupStatus').textContent = 'Please enter a username';
-                document.getElementById('setupStatus').className = 'status error';
+                alert('enter a username');
                 return;
             }
-            
-            document.getElementById('setupStatus').textContent = 'Connecting...';
-            document.getElementById('setupStatus').className = 'status';
-            
+
             try {
-                if (!wasmReady) {
-                    throw new Error('WASM not loaded');
-                }
-                
-                // Get ticket using ApiClient
-                const ticketResp = await api.getTicket({ username });
-                ticket = ticketResp.ticket;
-                
-                // Get cert hash for self-signed certs
+                // Get ticket
+                const resp = await api.getTicket({ username });
+                ticket = resp.ticket;
+
+                // Get cert hash for WebTransport
                 try {
                     certHash = await api.getCertHash();
-                    if (certHash) {
-                        log('Got server certificate hash');
-                    }
+                    console.log('Got cert hash:', certHash);
                 } catch (e) {
-                    log('Warning: Could not fetch cert hash: ' + e.message, 'error');
+                    console.warn('Could not get cert hash:', e);
                 }
-                
-                document.getElementById('setup').classList.add('hidden');
-                document.getElementById('app').classList.remove('hidden');
-                setStatus('Connected as ' + username, 'connected');
-                log('Connected as ' + username);
-                
-                await loadRooms();
-                
+
+                document.querySelector('.setup').style.display = 'none';
+                document.querySelector('.chat').style.display = 'flex';
+
+                log('authenticated as ' + username, true);
+                refreshRooms();
             } catch (e) {
-                document.getElementById('setupStatus').textContent = 'Error: ' + e.message;
-                document.getElementById('setupStatus').className = 'status error';
+                alert('auth failed: ' + e.message);
             }
         }
-        
-        async function loadRooms() {
+
+        async function refreshRooms() {
             try {
                 const rooms = await api.listRooms();
-                
-                const el = document.getElementById('roomsList');
-                el.innerHTML = '';
-                
-                if (rooms.length === 0) {
-                    el.innerHTML = '<div style="color:#888;padding:10px">No rooms yet</div>';
-                } else {
-                    rooms.forEach(room => {
-                        const div = document.createElement('div');
-                        const roomId = room.id.inner !== undefined ? room.id.inner : room.id;
-                        div.className = 'room-item' + (roomId === currentRoomId ? ' active' : '');
-                        div.innerHTML = `<span>Room ${roomId}</span><span>${room.player_count} users</span>`;
-                        div.onclick = () => joinRoom(roomId);
-                        el.appendChild(div);
-                    });
+                const select = document.getElementById('roomSelect');
+                select.innerHTML = '<option value="">-- select room --</option>';
+                for (const room of rooms) {
+                    const opt = document.createElement('option');
+                    // room.id might be BigInt from u64, convert to Number
+                    const id = typeof room.id === 'bigint' ? Number(room.id) : room.id;
+                    opt.value = id;
+                    opt.textContent = `Room ${id} (${room.player_count} players)`;
+                    select.appendChild(opt);
                 }
             } catch (e) {
-                log('Failed to load rooms: ' + e.message, 'error');
+                log('failed to list rooms: ' + e.message, true);
             }
         }
-        
+
         async function createRoom() {
+            if (!ticket) return;
             try {
-                const result = await api.createRoom(ticket);
-                log(`Created room ${result.room_id}`);
-                await loadRooms();
-                await joinRoom(result.room_id);
+                const resp = await api.createRoom(ticket);
+                // room_id might be BigInt from u64
+                const id = typeof resp.room_id === 'bigint' ? Number(resp.room_id) : resp.room_id;
+                log('created room ' + id, true);
+                await refreshRooms();
             } catch (e) {
-                log('Failed to create room: ' + e.message, 'error');
+                log('failed to create room: ' + e.message, true);
             }
         }
-        
-        async function joinRoom(roomId) {
-            if (currentRoomId === roomId) return;
-            
-            if (roomClient) {
-                try {
-                    await roomClient.close();
-                } catch (e) {}
-                roomClient = null;
+
+        async function joinRoom() {
+            if (!ticket) return;
+            if (inRoom) {
+                log('already in a room, leave first', true);
+                return;
             }
-            
-            log(`Joining room ${roomId}...`);
-            
+
+            const roomId = Number(document.getElementById('roomSelect').value);
+            if (!roomId) {
+                log('select a room first', true);
+                return;
+            }
+
             try {
-                // Use JsRoomClient with cert hash
-                roomClient = await JsRoomClient.connectWithCert(
+                log('connecting to room ' + roomId + '...', true);
+
+                // Connect with WebTransport + cert hash
+                roomConnection = await JsRoomConnection.connectWithOptions(
                     SERVER_QUIC,
                     ticket,
-                    BigInt(roomId),
-                    certHash
+                    roomId,
+                    certHash,
+                    false // use WebTransport
                 );
+
+                // Open a channel for chat
+                chatChannel = await roomConnection.openChannel();
                 
-                currentRoomId = roomId;
-                document.getElementById('roomTitle').textContent = `#${roomId}`;
-                log(`Joined room ${roomId}!`);
-                setStatus(`In room ${roomId} as ${username}`, 'connected');
-                
-                listenForMessages();
-                await loadRooms();
-                
+                inRoom = true;
+                setStatus('connected (room ' + roomId + ')', true);
+                log('joined room ' + roomId, true);
+
+                // Start receive loop
+                receiveLoop();
             } catch (e) {
-                log('Failed to join room: ' + e.message, 'error');
+                log('failed to join room: ' + e.message, true);
+                setStatus('connection failed');
             }
         }
-        
-        async function listenForMessages() {
-            const client = roomClient;
+
+        async function receiveLoop() {
+            while (inRoom && chatChannel) {
+                try {
+                    const data = await chatChannel.read();
+                    if (!data || data.length === 0) {
+                        break;
+                    }
+                    // Process received data (may contain partial messages)
+                    handleReceivedData(data);
+                } catch (e) {
+                    if (inRoom) {
+                        log('connection lost: ' + e.message, true);
+                    }
+                    break;
+                }
+            }
             
-            try {
-                while (roomClient === client) {
-                    const data = await client.recv();
-                    const msg = new TextDecoder().decode(new Uint8Array(data));
-                    log(msg, 'chat');
-                }
-            } catch (e) {
-                if (roomClient === client) {
-                    log('Disconnected from room: ' + e.message, 'error');
-                    setStatus('Disconnected', 'error');
-                    currentRoomId = null;
-                    roomClient = null;
-                }
+            if (inRoom) {
+                inRoom = false;
+                chatChannel = null;
+                roomConnection = null;
+                setStatus('disconnected');
             }
         }
-        
+
+        // Buffer for message reassembly
+        let recvBuffer = new Uint8Array(0);
+
+        function handleReceivedData(data) {
+            // Append to buffer
+            const newBuf = new Uint8Array(recvBuffer.length + data.length);
+            newBuf.set(recvBuffer);
+            newBuf.set(data, recvBuffer.length);
+            recvBuffer = newBuf;
+
+            // Try to extract complete messages
+            while (recvBuffer.length >= 4) {
+                const len = (recvBuffer[0] << 24) | (recvBuffer[1] << 16) | (recvBuffer[2] << 8) | recvBuffer[3];
+                if (recvBuffer.length < 4 + len) {
+                    break;
+                }
+
+                const msgBytes = recvBuffer.slice(4, 4 + len);
+                recvBuffer = recvBuffer.slice(4 + len);
+
+                const msg = new TextDecoder().decode(msgBytes);
+                log(msg);
+            }
+        }
+
+        function leaveRoom() {
+            if (!inRoom) return;
+            
+            inRoom = false;
+            if (chatChannel) {
+                chatChannel.close().catch(() => {});
+                chatChannel = null;
+            }
+            roomConnection = null;
+            recvBuffer = new Uint8Array(0);
+            
+            setStatus('disconnected');
+            log('left room', true);
+        }
+
         async function sendMessage() {
-            const input = document.getElementById('msgInput');
-            const msg = input.value.trim();
-            
-            if (!msg || !roomClient) return;
-            
-            const fullMsg = `${username}: ${msg}`;
-            
-            // Local echo - show immediately
-            log(fullMsg, 'you');
+            if (!inRoom || !chatChannel) {
+                log('not in a room', true);
+                return;
+            }
+
+            const input = document.getElementById('messageInput');
+            const text = input.value.trim();
+            if (!text) return;
+
             input.value = '';
             
+            // Format: "username: message"
+            const msg = `${username}: ${text}`;
+            
+            // Local echo
+            log(msg, false, true);
+            
+            // Frame with length prefix
+            const msgBytes = new TextEncoder().encode(msg);
+            const frame = new Uint8Array(4 + msgBytes.length);
+            const len = msgBytes.length;
+            frame[0] = (len >> 24) & 0xff;
+            frame[1] = (len >> 16) & 0xff;
+            frame[2] = (len >> 8) & 0xff;
+            frame[3] = len & 0xff;
+            frame.set(msgBytes, 4);
+
             try {
-                await roomClient.send(new TextEncoder().encode(fullMsg));
+                await chatChannel.write(frame);
             } catch (e) {
-                log('Failed to send: ' + e.message, 'error');
+                log('send failed: ' + e.message, true);
             }
         }
-        
-        // Initialize
-        document.getElementById('username').focus();
-        initWasm();
-        setInterval(() => { if (ticket) loadRooms(); }, 5000);
     </script>
 </body>
 </html>

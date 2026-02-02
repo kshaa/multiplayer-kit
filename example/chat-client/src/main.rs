@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo run --bin chat-client
 
-use multiplayer_kit_client::{ApiClient, LobbyClient, RoomClient};
-use multiplayer_kit_protocol::{LobbyEvent, RoomId, RoomInfo};
+use multiplayer_kit_client::{ApiClient, Channel, RoomConnection};
+use multiplayer_kit_protocol::RoomId;
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
 use tokio::sync::mpsc;
@@ -16,8 +16,8 @@ struct AuthRequest {
     username: String,
 }
 
-enum RoomEvent {
-    Message(String),
+enum ChatEvent {
+    Message(Vec<u8>),
     Disconnected(String),
 }
 
@@ -59,14 +59,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  <message>  - Send a chat message (when in a room)");
     println!();
 
-    let mut rooms: Vec<RoomInfo> = Vec::new();
-    let mut lobby: Option<LobbyClient> = None;
-    
-    // Room state - sender for outgoing messages, receiver for incoming
-    let mut room_sender: Option<mpsc::Sender<Vec<u8>>> = None;
+    // Room connection and channel state
+    #[allow(unused_assignments)]
+    let mut room_conn: Option<RoomConnection> = None;
+    let mut chat_channel: Option<std::sync::Arc<Channel>> = None;
     let mut in_room = false;
     
-    // Channel for stdin lines (read in blocking thread)
+    // Channel for stdin lines
     let (line_tx, mut line_rx) = mpsc::channel::<String>(10);
     
     // Spawn blocking stdin reader
@@ -86,8 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     
-    // Channel for room events (messages and disconnections)
-    let (room_event_tx, mut room_event_rx) = mpsc::channel::<RoomEvent>(256);
+    // Channel for chat events
+    let (chat_event_tx, mut chat_event_rx) = mpsc::channel::<ChatEvent>(256);
 
     // Print initial prompt
     print!("> ");
@@ -95,15 +94,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         tokio::select! {
-            // Handle incoming room events
-            Some(event) = room_event_rx.recv() => {
+            // Handle incoming chat events
+            Some(event) = chat_event_rx.recv() => {
                 match event {
-                    RoomEvent::Message(msg) => {
-                        print!("\r\x1b[K{}\n", msg);
+                    ChatEvent::Message(data) => {
+                        if let Ok(msg) = String::from_utf8(data) {
+                            print!("\r\x1b[K{}\n", msg);
+                        }
                     }
-                    RoomEvent::Disconnected(reason) => {
+                    ChatEvent::Disconnected(reason) => {
                         print!("\r\x1b[K[Disconnected: {}]\n", reason);
-                        room_sender = None;
+                        chat_channel = None;
+                        room_conn = None;
                         in_room = false;
                     }
                 }
@@ -142,40 +144,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         "/rooms" => {
-                            if lobby.is_none() {
-                                println!("Connecting to lobby...");
-                                match LobbyClient::connect(SERVER_QUIC, &ticket).await {
-                                    Ok(l) => {
-                                        lobby = Some(l);
-                                        println!("Connected to lobby!");
-                                    }
-                                    Err(e) => {
-                                        println!("Failed to connect to lobby: {}", e);
-                                    }
-                                }
-                            }
-
-                            if let Some(ref mut l) = lobby {
-                                match l.recv().await {
-                                    Ok(LobbyEvent::Snapshot(r)) => {
-                                        rooms = r;
-                                    }
-                                    Ok(event) => {
-                                        println!("Received event: {:?}", event);
-                                    }
-                                    Err(e) => {
-                                        println!("Error receiving from lobby: {}", e);
-                                        lobby = None;
+                            match api.list_rooms().await {
+                                Ok(r) => {
+                                    let rooms = r;
+                                    if rooms.is_empty() {
+                                        println!("No rooms available. Create one with /create");
+                                    } else {
+                                        println!("Available rooms:");
+                                        for r in &rooms {
+                                            println!("  [{}] {} players", r.id.0, r.player_count);
+                                        }
                                     }
                                 }
-                            }
-
-                            if rooms.is_empty() {
-                                println!("No rooms available. Create one with /create");
-                            } else {
-                                println!("Available rooms:");
-                                for r in &rooms {
-                                    println!("  [{}] {} players", r.id.0, r.player_count);
+                                Err(e) => {
+                                    println!("Failed to list rooms: {}", e);
                                 }
                             }
                         }
@@ -215,45 +197,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
 
                                 println!("Joining room {}...", room_id);
-                                match RoomClient::connect(SERVER_QUIC, &ticket, RoomId(room_id)).await {
-                                    Ok(room) => {
-                                        println!("Joined room {}! Start chatting.", room_id);
-                                        
-                                        // Create channel for sending to room
-                                        let (send_tx, mut send_rx) = mpsc::channel::<Vec<u8>>(256);
-                                        room_sender = Some(send_tx);
-                                        in_room = true;
-                                        
-                                        // Spawn task to handle room I/O
-                                        let event_tx = room_event_tx.clone();
-                                        tokio::spawn(async move {
-                                            let mut room = room;
-                                            loop {
-                                                tokio::select! {
-                                                    // Send outgoing messages
-                                                    Some(data) = send_rx.recv() => {
-                                                        if let Err(e) = room.send(&data).await {
-                                                            let _ = event_tx.send(RoomEvent::Disconnected(e.to_string())).await;
-                                                            break;
-                                                        }
-                                                    }
-                                                    // Receive incoming messages
-                                                    result = room.recv() => {
-                                                        match result {
-                                                            Ok(data) => {
-                                                                if let Ok(msg) = String::from_utf8(data) {
-                                                                    let _ = event_tx.send(RoomEvent::Message(msg)).await;
+                                match RoomConnection::connect(SERVER_QUIC, &ticket, RoomId(room_id)).await {
+                                    Ok(conn) => {
+                                        // Open a single channel for chat
+                                        match conn.open_channel().await {
+                                            Ok(channel) => {
+                                                println!("Joined room {}! Start chatting.", room_id);
+                                                
+                                                let channel = std::sync::Arc::new(channel);
+                                                chat_channel = Some(std::sync::Arc::clone(&channel));
+                                                room_conn = Some(conn);
+                                                in_room = true;
+                                                
+                                                // Spawn read task for this channel
+                                                let event_tx = chat_event_tx.clone();
+                                                let read_channel = std::sync::Arc::clone(&channel);
+                                                tokio::spawn(async move {
+                                                    let mut buf = vec![0u8; 64 * 1024];
+                                                    loop {
+                                                        match read_channel.read(&mut buf).await {
+                                                            Ok(n) if n > 0 => {
+                                                                let data = buf[..n].to_vec();
+                                                                if event_tx.send(ChatEvent::Message(data)).await.is_err() {
+                                                                    break;
                                                                 }
                                                             }
+                                                            Ok(_) => {
+                                                                let _ = event_tx.send(ChatEvent::Disconnected("Stream closed".to_string())).await;
+                                                                break;
+                                                            }
                                                             Err(e) => {
-                                                                let _ = event_tx.send(RoomEvent::Disconnected(e.to_string())).await;
+                                                                let _ = event_tx.send(ChatEvent::Disconnected(e.to_string())).await;
                                                                 break;
                                                             }
                                                         }
                                                     }
-                                                }
+                                                });
                                             }
-                                        });
+                                            Err(e) => {
+                                                println!("Failed to open channel: {}", e);
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         println!("Failed to join room: {}", e);
@@ -264,8 +248,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         "/leave" => {
                             if in_room {
-                                // Drop the sender, which will cause the room task to exit
-                                room_sender = None;
+                                chat_channel = None;
+                                room_conn = None;
                                 in_room = false;
                                 println!("Left room.");
                             } else {
@@ -279,13 +263,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else {
                     // Send chat message
-                    if let Some(ref sender) = room_sender {
+                    if let Some(ref channel) = chat_channel {
                         let message = format!("{}: {}", username, input);
-                        // Local echo - show immediately
+                        // Local echo
                         println!("{}", message);
-                        if sender.send(message.into_bytes()).await.is_err() {
-                            println!("Failed to send: room disconnected");
-                            room_sender = None;
+                        
+                        // Send with length prefix (game's framing protocol)
+                        let msg_bytes = message.as_bytes();
+                        let len = (msg_bytes.len() as u32).to_be_bytes();
+                        let mut payload = Vec::with_capacity(4 + msg_bytes.len());
+                        payload.extend_from_slice(&len);
+                        payload.extend_from_slice(msg_bytes);
+                        
+                        if let Err(e) = channel.write(&payload).await {
+                            println!("Failed to send: {}", e);
+                            chat_channel = None;
+                            room_conn = None;
                             in_room = false;
                         }
                     } else {

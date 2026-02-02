@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Builder for constructing a Server instance.
-pub struct ServerBuilder<T: UserContext> {
+pub struct ServerBuilder<T: UserContext + Unpin> {
     config: ServerConfig,
     auth_handler: Option<Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>>,
     actor_factory: Option<ActorFactory<T>>,
@@ -14,7 +14,7 @@ pub struct ServerBuilder<T: UserContext> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: UserContext> ServerBuilder<T> {
+impl<T: UserContext + Unpin> ServerBuilder<T> {
     pub fn new() -> Self {
         Self {
             config: ServerConfig::default(),
@@ -108,7 +108,7 @@ impl<T: UserContext> ServerBuilder<T> {
     }
 }
 
-impl<T: UserContext> Default for ServerBuilder<T> {
+impl<T: UserContext + Unpin> Default for ServerBuilder<T> {
     fn default() -> Self {
         Self::new()
     }

@@ -5,12 +5,14 @@ pub mod quic;
 pub mod rest;
 pub mod room;
 pub mod ticket;
+pub mod ws;
 
 use crate::lobby::Lobby;
 use crate::quic::QuicState;
 use crate::rest::AppState;
 use crate::room::{ActorFactory, RoomConfig, RoomManager};
 use crate::ticket::TicketManager;
+use crate::ws::WsState;
 use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
 use multiplayer_kit_protocol::{RejectReason, UserContext};
@@ -32,7 +34,7 @@ pub use room::RoomContext;
 pub type AuthFuture<T> = Pin<Box<dyn Future<Output = Result<T, RejectReason>> + Send>>;
 
 /// The main server struct, generic over user context type.
-pub struct Server<T: UserContext> {
+pub struct Server<T: UserContext + Unpin> {
     config: ServerConfig,
     auth_handler: Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>,
     actor_factory: ActorFactory<T>,
@@ -76,7 +78,7 @@ pub struct AuthRequest {
     pub body: Option<Vec<u8>>,
 }
 
-impl<T: UserContext + 'static> Server<T> {
+impl<T: UserContext + Unpin + 'static> Server<T> {
     /// Create a new server builder.
     pub fn builder() -> ServerBuilder<T> {
         ServerBuilder::new()
@@ -134,6 +136,13 @@ impl<T: UserContext + 'static> Server<T> {
             cert_hash: Arc::clone(&cert_hash),
         });
 
+        // WebSocket state
+        let ws_state = web::Data::new(WsState {
+            room_manager: Arc::clone(&room_manager),
+            ticket_manager: Arc::clone(&ticket_manager),
+            lobby: Arc::clone(&lobby),
+        });
+
         // QUIC state
         let quic_state = Arc::new(QuicState {
             room_manager: Arc::clone(&room_manager),
@@ -158,11 +167,14 @@ impl<T: UserContext + 'static> Server<T> {
             App::new()
                 .wrap(cors)
                 .app_data(app_state.clone())
+                .app_data(ws_state.clone())
                 .route("/ticket", web::post().to(rest::issue_ticket::<T>))
                 .route("/rooms", web::post().to(rest::create_room::<T>))
                 .route("/rooms", web::get().to(rest::list_rooms::<T>))
                 .route("/rooms/{id}", web::delete().to(rest::delete_room::<T>))
                 .route("/cert-hash", web::get().to(rest::get_cert_hash::<T>))
+                // WebSocket endpoint for rooms
+                .route("/ws/room/{id}", web::get().to(ws::room_ws::<T>))
         })
         .bind(&http_addr)?
         .run();
