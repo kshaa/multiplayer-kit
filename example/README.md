@@ -11,7 +11,7 @@ cargo run --bin chat-server
 
 Start the CLI client (in another terminal):
 ```bash
-cargo run --bin chat-client
+cargo run --bin chat-cli
 ```
 
 ## Endpoints

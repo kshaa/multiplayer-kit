@@ -3,5 +3,5 @@ resolver = "2"
 
 members = [
     "chat-server",
-    "chat-client",
+    "chat-cli",
 ]

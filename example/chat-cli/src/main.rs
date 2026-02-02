@@ -1,6 +1,6 @@
-//! Simple chat client REPL using multiplayer-kit.
+//! Simple chat CLI client using multiplayer-kit.
 //!
-//! Run with: cargo run --bin chat-client
+//! Run with: cargo run --bin chat-cli
 
 use multiplayer_kit_client::{ApiClient, Channel, RoomConnection};
 use multiplayer_kit_protocol::RoomId;
