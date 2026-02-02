@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 multiplayer-kit-server = { path = "../../server" }
 multiplayer-kit-protocol = { path = "../../protocol" }
+multiplayer-kit-helpers = { path = "../../helpers", default-features = false, features = ["server"] }
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

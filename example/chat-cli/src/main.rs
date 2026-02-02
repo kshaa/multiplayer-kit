@@ -2,11 +2,13 @@
 //!
 //! Run with: cargo run --bin chat-cli
 
-use multiplayer_kit_client::{ApiClient, Channel, RoomConnection};
+use multiplayer_kit_client::{ApiClient, RoomConnection};
+use multiplayer_kit_helpers::MessageChannel;
 use multiplayer_kit_protocol::RoomId;
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 
 const SERVER_HTTP: &str = "http://127.0.0.1:8080";
 const SERVER_QUIC: &str = "https://127.0.0.1:4433";
@@ -17,7 +19,7 @@ struct AuthRequest {
 }
 
 enum ChatEvent {
-    Message(Vec<u8>),
+    Message(String),
     Disconnected(String),
 }
 
@@ -60,9 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Room connection and channel state
-    #[allow(unused_assignments)]
-    let mut room_conn: Option<RoomConnection> = None;
-    let mut chat_channel: Option<std::sync::Arc<Channel>> = None;
+    let mut _room_conn: Option<RoomConnection> = None;
+    let mut chat_channel: Option<Arc<Mutex<MessageChannel>>> = None;
     let mut in_room = false;
     
     // Channel for stdin lines
@@ -97,15 +98,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Handle incoming chat events
             Some(event) = chat_event_rx.recv() => {
                 match event {
-                    ChatEvent::Message(data) => {
-                        if let Ok(msg) = String::from_utf8(data) {
-                            print!("\r\x1b[K{}\n", msg);
-                        }
+                    ChatEvent::Message(msg) => {
+                        print!("\r\x1b[K{}\n", msg);
                     }
                     ChatEvent::Disconnected(reason) => {
                         print!("\r\x1b[K[Disconnected: {}]\n", reason);
                         chat_channel = None;
-                        room_conn = None;
+                        _room_conn = None;
                         in_room = false;
                     }
                 }
@@ -135,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if input.starts_with('/') {
                     let parts: Vec<&str> = input.splitn(2, ' ').collect();
                     let cmd = parts[0];
-                    let arg = parts.get(1).map(|s| *s);
+                    let arg = parts.get(1).copied();
 
                     match cmd {
                         "/quit" | "/exit" | "/q" => {
@@ -145,8 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         "/rooms" => {
                             match api.list_rooms().await {
-                                Ok(r) => {
-                                    let rooms = r;
+                                Ok(rooms) => {
                                     if rooms.is_empty() {
                                         println!("No rooms available. Create one with /create");
                                     } else {
@@ -183,14 +181,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Ok(id) => id,
                                         Err(_) => {
                                             println!("Invalid room ID");
-                                            if in_room { print!("[room] > "); } else { print!("> "); }
+                                            print!("> ");
                                             io::stdout().flush()?;
                                             continue;
                                         }
                                     },
                                     None => {
                                         println!("Usage: /join <room_id>");
-                                        if in_room { print!("[room] > "); } else { print!("> "); }
+                                        print!("> ");
                                         io::stdout().flush()?;
                                         continue;
                                     }
@@ -204,25 +202,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Ok(channel) => {
                                                 println!("Joined room {}! Start chatting.", room_id);
                                                 
-                                                let channel = std::sync::Arc::new(channel);
-                                                chat_channel = Some(std::sync::Arc::clone(&channel));
-                                                room_conn = Some(conn);
+                                                // Wrap in MessageChannel for automatic framing
+                                                let msg_channel = Arc::new(Mutex::new(MessageChannel::new(channel)));
+                                                chat_channel = Some(Arc::clone(&msg_channel));
+                                                _room_conn = Some(conn);
                                                 in_room = true;
                                                 
                                                 // Spawn read task for this channel
                                                 let event_tx = chat_event_tx.clone();
-                                                let read_channel = std::sync::Arc::clone(&channel);
                                                 tokio::spawn(async move {
-                                                    let mut buf = vec![0u8; 64 * 1024];
                                                     loop {
-                                                        match read_channel.read(&mut buf).await {
-                                                            Ok(n) if n > 0 => {
-                                                                let data = buf[..n].to_vec();
-                                                                if event_tx.send(ChatEvent::Message(data)).await.is_err() {
-                                                                    break;
+                                                        let result = {
+                                                            let mut channel = msg_channel.lock().await;
+                                                            channel.recv().await
+                                                        };
+                                                        
+                                                        match result {
+                                                            Ok(Some(data)) => {
+                                                                if let Ok(msg) = String::from_utf8(data) {
+                                                                    if event_tx.send(ChatEvent::Message(msg)).await.is_err() {
+                                                                        break;
+                                                                    }
                                                                 }
                                                             }
-                                                            Ok(_) => {
+                                                            Ok(None) => {
                                                                 let _ = event_tx.send(ChatEvent::Disconnected("Stream closed".to_string())).await;
                                                                 break;
                                                             }
@@ -249,7 +252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "/leave" => {
                             if in_room {
                                 chat_channel = None;
-                                room_conn = None;
+                                _room_conn = None;
                                 in_room = false;
                                 println!("Left room.");
                             } else {
@@ -268,17 +271,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Local echo
                         println!("{}", message);
                         
-                        // Send with length prefix (game's framing protocol)
-                        let msg_bytes = message.as_bytes();
-                        let len = (msg_bytes.len() as u32).to_be_bytes();
-                        let mut payload = Vec::with_capacity(4 + msg_bytes.len());
-                        payload.extend_from_slice(&len);
-                        payload.extend_from_slice(msg_bytes);
-                        
-                        if let Err(e) = channel.write(&payload).await {
+                        // Send using MessageChannel (auto-framed)
+                        let mut channel = channel.lock().await;
+                        if let Err(e) = channel.send(message.as_bytes()).await {
                             println!("Failed to send: {}", e);
+                            drop(channel);
                             chat_channel = None;
-                            room_conn = None;
+                            _room_conn = None;
                             in_room = false;
                         }
                     } else {

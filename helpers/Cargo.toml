@@ -1,0 +1,16 @@
+[package]
+name = "multiplayer-kit-helpers"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+multiplayer-kit-protocol = { path = "../protocol" }
+multiplayer-kit-client = { path = "../client", optional = true }
+multiplayer-kit-server = { path = "../server", optional = true }
+thiserror = "1"
+tracing = "0.1"
+
+[features]
+default = ["client", "server"]
+client = ["multiplayer-kit-client"]
+server = ["multiplayer-kit-server"]

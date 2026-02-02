@@ -5,4 +5,5 @@ members = [
     "protocol",
     "server",
     "client",
+    "helpers",
 ]
