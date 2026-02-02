@@ -27,7 +27,7 @@ use wtransport::ServerConfig as WtServerConfig;
 
 pub use builder::ServerBuilder;
 pub use error::ServerError;
-pub use multiplayer_kit_protocol::{Outgoing, RoomEvent, RoomId, Route};
+pub use multiplayer_kit_protocol::{ChannelId, Outgoing, RoomEvent, RoomId, Route};
 pub use room::RoomContext;
 
 /// Type alias for auth handler boxed future.

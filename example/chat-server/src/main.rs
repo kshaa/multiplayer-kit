@@ -4,10 +4,10 @@
 //!
 //! Protocol: Messages use 4-byte big-endian length prefix + UTF-8 string.
 
-use multiplayer_kit_protocol::{Outgoing, RejectReason, RoomEvent, Route, UserContext};
+use multiplayer_kit_protocol::{ChannelId, Outgoing, RejectReason, RoomEvent, Route, UserContext};
 use multiplayer_kit_server::{AuthRequest, RoomContext, Server};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// User context - just a username and ID.
@@ -82,40 +82,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let room_id = ctx.room_id;
             tracing::info!("[Room {:?}] Actor started", room_id);
 
-            // Per-user message buffers for reassembly
-            let mut user_buffers: HashMap<u64, Vec<u8>> = HashMap::new();
+            // Track all open channels
+            let mut all_channels: HashSet<ChannelId> = HashSet::new();
+            // Map channel -> user for message attribution
+            let mut channel_users: HashMap<ChannelId, ChatUser> = HashMap::new();
+            // Per-channel message buffers for reassembly
+            let mut channel_buffers: HashMap<ChannelId, Vec<u8>> = HashMap::new();
 
             loop {
                 match ctx.events.recv().await {
                     Some(RoomEvent::UserJoined(user)) => {
                         tracing::info!("[Room {:?}] {} joined", room_id, user.username);
                         
-                        // Init buffer for this user
-                        user_buffers.insert(user.id, Vec::new());
-                        
-                        // Broadcast join notification
+                        // Broadcast join notification to all existing channels
                         let msg = format!("*** {} joined the chat ***", user.username);
-                        ctx.send(Outgoing::new(
-                            frame_message(&msg),
-                            Route::Broadcast,
-                        )).await;
+                        let targets: Vec<_> = all_channels.iter().copied().collect();
+                        if !targets.is_empty() {
+                            ctx.send(Outgoing::new(
+                                frame_message(&msg),
+                                Route::Channels(targets),
+                            )).await;
+                        }
                     }
                     Some(RoomEvent::UserLeft(user)) => {
                         tracing::info!("[Room {:?}] {} left", room_id, user.username);
                         
-                        // Clean up buffer
-                        user_buffers.remove(&user.id);
-                        
-                        // Broadcast leave notification
+                        // Broadcast leave notification to all remaining channels
                         let msg = format!("*** {} left the chat ***", user.username);
-                        ctx.send(Outgoing::new(
-                            frame_message(&msg),
-                            Route::Broadcast,
-                        )).await;
+                        let targets: Vec<_> = all_channels.iter().copied().collect();
+                        if !targets.is_empty() {
+                            ctx.send(Outgoing::new(
+                                frame_message(&msg),
+                                Route::Channels(targets),
+                            )).await;
+                        }
                     }
-                    Some(RoomEvent::Message { sender, payload }) => {
-                        // Append to this user's buffer
-                        let buffer = user_buffers.entry(sender.id).or_default();
+                    Some(RoomEvent::ChannelOpened { user, channel }) => {
+                        tracing::debug!("[Room {:?}] Channel {:?} opened by {}", room_id, channel, user.username);
+                        all_channels.insert(channel);
+                        channel_users.insert(channel, user);
+                        channel_buffers.insert(channel, Vec::new());
+                    }
+                    Some(RoomEvent::ChannelClosed { user, channel }) => {
+                        tracing::debug!("[Room {:?}] Channel {:?} closed by {}", room_id, channel, user.username);
+                        all_channels.remove(&channel);
+                        channel_users.remove(&channel);
+                        channel_buffers.remove(&channel);
+                    }
+                    Some(RoomEvent::Message { sender, channel, payload }) => {
+                        // Append to this channel's buffer
+                        let buffer = channel_buffers.entry(channel).or_default();
                         buffer.extend_from_slice(&payload);
                         
                         // Try to extract complete messages
@@ -131,11 +147,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             
                             tracing::info!("[Room {:?}] {}", room_id, text);
                             
-                            // Forward to others (sender already has local echo)
-                            ctx.send(Outgoing::new(
-                                frame_message(text),
-                                Route::AllExcept(vec![sender.id()]),
-                            )).await;
+                            // Forward to all OTHER channels (sender already has local echo)
+                            let targets: Vec<_> = all_channels.iter()
+                                .filter(|&c| *c != channel)
+                                .copied()
+                                .collect();
+                            if !targets.is_empty() {
+                                ctx.send(Outgoing::new(
+                                    frame_message(text),
+                                    Route::Channels(targets),
+                                )).await;
+                            }
                         }
                     }
                     Some(RoomEvent::Shutdown) => {

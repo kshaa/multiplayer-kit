@@ -8,49 +8,63 @@ pub trait UserContext: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sy
     fn id(&self) -> Self::Id;
 }
 
+/// Unique identifier for a channel (bidirectional stream).
+/// Assigned by the server when a client opens a channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChannelId(pub u64);
+
 /// Routing decision for outgoing messages.
 #[derive(Debug, Clone)]
-pub enum Route<Id> {
-    /// Send to all participants.
-    Broadcast,
-    /// Send only to these specific users.
-    Only(Vec<Id>),
-    /// Send to everyone except these users.
-    AllExcept(Vec<Id>),
+pub enum Route {
+    /// Send to specific channels.
+    Channels(Vec<ChannelId>),
     /// Don't send to anyone.
     None,
 }
 
 /// An outgoing message from a room actor.
 #[derive(Debug, Clone)]
-pub struct Outgoing<Id> {
+pub struct Outgoing {
     pub payload: Vec<u8>,
-    pub route: Route<Id>,
+    pub route: Route,
 }
 
-impl<Id> Outgoing<Id> {
-    pub fn new(payload: impl Into<Vec<u8>>, route: Route<Id>) -> Self {
+impl Outgoing {
+    pub fn new(payload: impl Into<Vec<u8>>, route: Route) -> Self {
         Self {
             payload: payload.into(),
             route,
         }
     }
-    
-    /// Broadcast to all participants.
-    pub fn broadcast(payload: impl Into<Vec<u8>>) -> Self {
-        Self::new(payload, Route::Broadcast)
+
+    /// Send to specific channels.
+    pub fn to_channels(payload: impl Into<Vec<u8>>, channels: Vec<ChannelId>) -> Self {
+        Self::new(payload, Route::Channels(channels))
+    }
+
+    /// Send to a single channel.
+    pub fn to_channel(payload: impl Into<Vec<u8>>, channel: ChannelId) -> Self {
+        Self::new(payload, Route::Channels(vec![channel]))
     }
 }
 
 /// Events sent to a room actor.
 #[derive(Debug, Clone)]
 pub enum RoomEvent<T: UserContext> {
-    /// A user joined the room.
+    /// A user joined the room (first channel opened).
     UserJoined(T),
-    /// A user left the room.
+    /// A user left the room (last channel closed).
     UserLeft(T),
-    /// A message was received from a user.
-    Message { sender: T, payload: Vec<u8> },
+    /// A channel was opened by a user.
+    ChannelOpened { user: T, channel: ChannelId },
+    /// A channel was closed.
+    ChannelClosed { user: T, channel: ChannelId },
+    /// A message was received on a channel.
+    Message {
+        sender: T,
+        channel: ChannelId,
+        payload: Vec<u8>,
+    },
     /// Room is shutting down.
     Shutdown,
 }

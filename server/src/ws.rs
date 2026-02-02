@@ -9,7 +9,7 @@ use crate::ticket::TicketManager;
 use actix::{Actor, ActorContext, AsyncContext, Handler, Message, StreamHandler};
 use actix_web::{web, HttpRequest, HttpResponse};
 use actix_web_actors::ws;
-use multiplayer_kit_protocol::{RoomId, UserContext};
+use multiplayer_kit_protocol::{ChannelId, RoomId, UserContext};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -30,8 +30,12 @@ pub struct RoomWsActor<T: UserContext + 'static> {
     room_id: RoomId,
     room_manager: Arc<RoomManager<T>>,
     lobby: Arc<Lobby>,
-    msg_tx: Option<mpsc::Sender<Vec<u8>>>,
+    /// Channel for receiving messages from the room actor.
     msg_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    /// Sender that gets passed to the room when channel is opened.
+    msg_tx_for_room: Option<mpsc::Sender<Vec<u8>>>,
+    /// The channel ID assigned by the room (set after channel opens).
+    channel_id: Option<ChannelId>,
     last_heartbeat: Instant,
     authenticated: bool,
 }
@@ -40,6 +44,11 @@ pub struct RoomWsActor<T: UserContext + 'static> {
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct RoomMessage(pub Vec<u8>);
+
+/// Message to set the channel ID after it's assigned.
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct SetChannelId(pub ChannelId);
 
 impl<T: UserContext + Unpin + 'static> RoomWsActor<T> {
     pub fn new(
@@ -54,15 +63,16 @@ impl<T: UserContext + Unpin + 'static> RoomWsActor<T> {
             room_id,
             room_manager,
             lobby,
-            msg_tx: Some(msg_tx),
             msg_rx: Some(msg_rx),
+            msg_tx_for_room: Some(msg_tx),
+            channel_id: None,
             last_heartbeat: Instant::now(),
             authenticated: false,
         }
     }
 
     fn heartbeat(&self, ctx: &mut ws::WebsocketContext<Self>) {
-        ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx| {
+        ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx: &mut ws::WebsocketContext<Self>| {
             if Instant::now().duration_since(act.last_heartbeat) > CLIENT_TIMEOUT {
                 tracing::debug!("WebSocket client heartbeat timeout");
                 ctx.stop();
@@ -92,18 +102,21 @@ impl<T: UserContext + Unpin + 'static> Actor for RoomWsActor<T> {
     fn started(&mut self, ctx: &mut Self::Context) {
         self.heartbeat(ctx);
 
-        // Join the room
+        // Open a channel in the room
         if let Some(room) = self.room_manager.get_room(self.room_id) {
-            if let Some(msg_tx) = self.msg_tx.take() {
+            if let Some(msg_tx) = self.msg_tx_for_room.take() {
                 let user = self.user.clone();
                 let room_id = self.room_id;
                 let lobby = Arc::clone(&self.lobby);
                 let room_manager = Arc::clone(&self.room_manager);
-
-                // Add participant in async context
                 let addr = ctx.address();
+
                 actix::spawn(async move {
-                    room.add_participant(user, msg_tx).await;
+                    // Open channel - this fires UserJoined (if first) and ChannelOpened events
+                    let channel_id = room.open_channel(user, msg_tx).await;
+
+                    // Tell the actor its channel ID
+                    let _ = addr.try_send(SetChannelId(channel_id));
 
                     // Notify lobby
                     if let Some(info) = room_manager.get_room_info(room_id) {
@@ -124,22 +137,24 @@ impl<T: UserContext + Unpin + 'static> Actor for RoomWsActor<T> {
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
-        // Remove from room
-        let user_id = self.user.id();
-        let room_id = self.room_id;
-        let room_manager = Arc::clone(&self.room_manager);
-        let lobby = Arc::clone(&self.lobby);
+        // Close the channel
+        if let Some(channel_id) = self.channel_id {
+            let room_id = self.room_id;
+            let room_manager = Arc::clone(&self.room_manager);
+            let lobby = Arc::clone(&self.lobby);
 
-        actix::spawn(async move {
-            if let Some(room) = room_manager.get_room(room_id) {
-                room.remove_participant(&user_id).await;
+            actix::spawn(async move {
+                if let Some(room) = room_manager.get_room(room_id) {
+                    // Close channel - fires ChannelClosed and UserLeft (if last channel)
+                    room.close_channel(channel_id).await;
 
-                // Notify lobby
-                if let Some(info) = room_manager.get_room_info(room_id) {
-                    lobby.notify_room_updated(info);
+                    // Notify lobby
+                    if let Some(info) = room_manager.get_room_info(room_id) {
+                        lobby.notify_room_updated(info);
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 }
 
@@ -148,6 +163,14 @@ impl<T: UserContext + Unpin + 'static> Handler<RoomMessage> for RoomWsActor<T> {
 
     fn handle(&mut self, msg: RoomMessage, ctx: &mut Self::Context) {
         ctx.binary(msg.0);
+    }
+}
+
+impl<T: UserContext + Unpin + 'static> Handler<SetChannelId> for RoomWsActor<T> {
+    type Result = ();
+
+    fn handle(&mut self, msg: SetChannelId, _ctx: &mut Self::Context) {
+        self.channel_id = Some(msg.0);
     }
 }
 
@@ -166,31 +189,35 @@ impl<T: UserContext + Unpin + 'static> StreamHandler<Result<ws::Message, ws::Pro
             Ok(ws::Message::Text(text)) => {
                 // Forward text as bytes to room actor
                 if self.authenticated {
-                    let payload = text.into_bytes().to_vec();
-                    let user = self.user.clone();
-                    let room_manager = Arc::clone(&self.room_manager);
-                    let room_id = self.room_id;
+                    if let Some(channel_id) = self.channel_id {
+                        let payload = text.into_bytes().to_vec();
+                        let user = self.user.clone();
+                        let room_manager = Arc::clone(&self.room_manager);
+                        let room_id = self.room_id;
 
-                    actix::spawn(async move {
-                        if let Some(room) = room_manager.get_room(room_id) {
-                            room.send_message(user, payload).await;
-                        }
-                    });
+                        actix::spawn(async move {
+                            if let Some(room) = room_manager.get_room(room_id) {
+                                room.send_message(user, channel_id, payload).await;
+                            }
+                        });
+                    }
                 }
             }
             Ok(ws::Message::Binary(data)) => {
                 // Forward binary to room actor
                 if self.authenticated {
-                    let payload = data.to_vec();
-                    let user = self.user.clone();
-                    let room_manager = Arc::clone(&self.room_manager);
-                    let room_id = self.room_id;
+                    if let Some(channel_id) = self.channel_id {
+                        let payload = data.to_vec();
+                        let user = self.user.clone();
+                        let room_manager = Arc::clone(&self.room_manager);
+                        let room_id = self.room_id;
 
-                    actix::spawn(async move {
-                        if let Some(room) = room_manager.get_room(room_id) {
-                            room.send_message(user, payload).await;
-                        }
-                    });
+                        actix::spawn(async move {
+                            if let Some(room) = room_manager.get_room(room_id) {
+                                room.send_message(user, channel_id, payload).await;
+                            }
+                        });
+                    }
                 }
             }
             Ok(ws::Message::Close(reason)) => {

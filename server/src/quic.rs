@@ -8,7 +8,7 @@
 use crate::lobby::Lobby;
 use crate::room::RoomManager;
 use crate::ticket::TicketManager;
-use multiplayer_kit_protocol::{LobbyEvent, RoomId, UserContext};
+use multiplayer_kit_protocol::{ChannelId, LobbyEvent, RoomId, UserContext};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use wtransport::endpoint::IncomingSession;
@@ -102,8 +102,8 @@ async fn handle_lobby_connection<T: UserContext>(
 /// 1. Client opens first bi-stream, sends ticket
 /// 2. Server validates, sends "joined"
 /// 3. Client opens additional bi-streams as "channels" - each is bidirectional
-/// 4. Client sends on bi-stream -> server reads -> actor processes
-/// 5. Actor sends response -> server writes back on SAME bi-stream
+/// 4. Client sends on bi-stream -> server reads -> actor processes with ChannelId
+/// 5. Actor sends response -> server writes back on SAME bi-stream using ChannelId routing
 async fn handle_room_connection<T: UserContext>(
     connection: Connection,
     room_id: RoomId,
@@ -124,27 +124,15 @@ async fn handle_room_connection<T: UserContext>(
         e
     })?;
 
-    let user_id = user.id();
     tracing::info!("Room client authenticated, joining room {:?}", room_id);
 
-    // Create a channel for outgoing messages to this client
-    let (msg_tx, msg_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-
-    // Add participant to room with their message channel
-    room.add_participant(user.clone(), msg_tx).await;
-
-    // Notify lobby of player count change
-    if let Some(info) = state.room_manager.get_room_info(room_id) {
-        state.lobby.notify_room_updated(info);
-    }
-
-    // Take the outbox receiver to broadcast actor messages
+    // Take the outbox receiver to route actor messages to channels
     if let Some(mut outbox_rx) = room.take_outbox_rx().await {
         let room_for_broadcast = Arc::clone(&room);
         tokio::spawn(async move {
             while let Some(outgoing) = outbox_rx.recv().await {
                 room_for_broadcast
-                    .broadcast(&outgoing.payload, outgoing.route)
+                    .send_to_channels(&outgoing.payload, outgoing.route)
                     .await;
             }
         });
@@ -153,11 +141,8 @@ async fn handle_room_connection<T: UserContext>(
     // Send join confirmation on auth stream
     auth_send.write_all(b"joined").await?;
 
-    // Wrap msg_rx in Arc<Mutex> so channel handler can share it
-    let msg_rx = Arc::new(tokio::sync::Mutex::new(msg_rx));
-
-    // Track active channel streams
-    let mut channel_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // Track active channel tasks
+    let mut channel_tasks: Vec<(ChannelId, tokio::task::JoinHandle<()>)> = Vec::new();
 
     // Main loop - accept new channel streams
     loop {
@@ -165,15 +150,25 @@ async fn handle_room_connection<T: UserContext>(
             result = connection.accept_bi() => {
                 match result {
                     Ok((send, recv)) => {
+                        // Each channel gets its own message channel
+                        let (msg_tx, msg_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+                        
+                        // Open channel in room (fires UserJoined if first, ChannelOpened always)
+                        let channel_id = room.open_channel(user.clone(), msg_tx).await;
+                        
+                        // Notify lobby of player count change
+                        if let Some(info) = state.room_manager.get_room_info(room_id) {
+                            state.lobby.notify_room_updated(info);
+                        }
+                        
                         // Spawn a task to handle this channel's persistent bi-stream
                         let channel_user = user.clone();
                         let channel_room = Arc::clone(&room);
-                        let channel_msg_rx = Arc::clone(&msg_rx);
                         
                         let task = tokio::spawn(async move {
-                            handle_channel_stream(send, recv, channel_user, channel_room, channel_msg_rx).await;
+                            handle_channel_stream(send, recv, channel_user, channel_room, channel_id, msg_rx).await;
                         });
-                        channel_tasks.push(task);
+                        channel_tasks.push((channel_id, task));
                     }
                     Err(e) => {
                         tracing::debug!("Error accepting bi-stream: {:?}", e);
@@ -188,11 +183,11 @@ async fn handle_room_connection<T: UserContext>(
         }
     }
 
-    // Cleanup
-    for task in channel_tasks {
+    // Cleanup - close all channels
+    for (channel_id, task) in channel_tasks {
         task.abort();
+        room.close_channel(channel_id).await;
     }
-    room.remove_participant(&user_id).await;
 
     // Notify lobby of player count change
     if let Some(info) = state.room_manager.get_room_info(room_id) {
@@ -205,14 +200,15 @@ async fn handle_room_connection<T: UserContext>(
 /// Handle a single persistent channel bi-stream.
 /// 
 /// This is bidirectional:
-/// - Reads from client and forwards to room actor
-/// - Receives from msg_rx and writes back to client on same stream
+/// - Reads from client and forwards to room actor with ChannelId
+/// - Receives from msg_rx (routed by ChannelId) and writes back to client
 async fn handle_channel_stream<T: UserContext>(
     mut send: wtransport::SendStream,
     mut recv: wtransport::RecvStream,
     user: T,
     room: Arc<crate::room::Room<T>>,
-    msg_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
+    channel_id: ChannelId,
+    mut msg_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) {
     let mut buf = vec![0u8; 64 * 1024]; // 64KB read buffer
     
@@ -221,30 +217,19 @@ async fn handle_channel_stream<T: UserContext>(
             // Read from client
             result = recv.read(&mut buf) => {
                 match result {
-                    Ok(Some(n)) => {
-                        if n == 0 {
-                            // Stream closed gracefully
-                            break;
-                        }
-                        // Forward raw bytes to room actor
+                    Ok(Some(n)) if n > 0 => {
+                        // Forward raw bytes to room actor with channel ID
                         let payload = buf[..n].to_vec();
-                        room.send_message(user.clone(), payload).await;
+                        room.send_message(user.clone(), channel_id, payload).await;
                     }
-                    Ok(None) => {
-                        // Stream closed gracefully
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Channel read error: {:?}", e);
+                    _ => {
+                        // Stream closed or error
                         break;
                     }
                 }
             }
-            // Write to client (messages from actor broadcast)
-            result = async {
-                let mut rx = msg_rx.lock().await;
-                rx.recv().await
-            } => {
+            // Write to client (messages routed to this channel)
+            result = msg_rx.recv() => {
                 match result {
                     Some(msg) => {
                         if let Err(e) = send.write_all(&msg).await {
@@ -260,6 +245,9 @@ async fn handle_channel_stream<T: UserContext>(
             }
         }
     }
+    
+    // Channel stream ended, close the channel in the room
+    room.close_channel(channel_id).await;
 }
 
 // Helper functions for reading/writing messages

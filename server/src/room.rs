@@ -1,8 +1,9 @@
-//! Room management with actor model.
+//! Room management with actor model and channel-based routing.
 
 use crate::lobby::Lobby;
 use dashmap::DashMap;
-use multiplayer_kit_protocol::{Outgoing, RoomEvent, RoomId, RoomInfo, Route, UserContext};
+use multiplayer_kit_protocol::{ChannelId, Outgoing, RoomEvent, RoomId, RoomInfo, Route, UserContext};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -20,20 +21,20 @@ pub type ActorFactory<T> = Arc<
 pub struct RoomContext<T: UserContext> {
     /// The room ID.
     pub room_id: RoomId,
-    /// Receiver for room events (join, leave, message, shutdown).
+    /// Receiver for room events (join, leave, channel open/close, message, shutdown).
     pub events: mpsc::Receiver<RoomEvent<T>>,
     /// Sender for outgoing messages.
-    outbox: OutboxSender<T>,
+    outbox: OutboxSender,
 }
 
 impl<T: UserContext> RoomContext<T> {
-    /// Send a message to participants.
-    pub async fn send(&self, msg: Outgoing<T::Id>) {
+    /// Send a message to channels.
+    pub async fn send(&self, msg: Outgoing) {
         let _ = self.outbox.tx.send(msg).await;
     }
 
     /// Send multiple messages.
-    pub async fn send_all(&self, msgs: impl IntoIterator<Item = Outgoing<T::Id>>) {
+    pub async fn send_all(&self, msgs: impl IntoIterator<Item = Outgoing>) {
         for msg in msgs {
             self.send(msg).await;
         }
@@ -41,14 +42,9 @@ impl<T: UserContext> RoomContext<T> {
 }
 
 /// Internal sender for outbox messages.
-struct OutboxSender<T: UserContext> {
-    tx: mpsc::Sender<Outgoing<T::Id>>,
-}
-
-impl<T: UserContext> Clone for OutboxSender<T> {
-    fn clone(&self) -> Self {
-        Self { tx: self.tx.clone() }
-    }
+#[derive(Clone)]
+struct OutboxSender {
+    tx: mpsc::Sender<Outgoing>,
 }
 
 /// Manages all active rooms.
@@ -74,19 +70,25 @@ pub struct Room<T: UserContext> {
     pub metadata: Option<serde_json::Value>,
     /// Send events to the actor.
     event_tx: mpsc::Sender<RoomEvent<T>>,
-    /// Participants and their message channels.
-    participants: RwLock<Vec<Participant<T>>>,
-    participant_count: AtomicU32,
+    /// Channels indexed by ChannelId.
+    channels: RwLock<HashMap<ChannelId, Channel<T>>>,
+    /// Track which users have channels open (for UserJoined/UserLeft events).
+    user_channels: RwLock<HashMap<T::Id, HashSet<ChannelId>>>,
+    /// Next channel ID.
+    next_channel_id: AtomicU64,
+    /// Number of unique users (not channels).
+    user_count: AtomicU32,
     last_activity: RwLock<Instant>,
     /// Receive outgoing messages from actor.
-    outbox_rx: RwLock<Option<mpsc::Receiver<Outgoing<T::Id>>>>,
+    outbox_rx: RwLock<Option<mpsc::Receiver<Outgoing>>>,
 }
 
-/// A participant in a room.
-pub struct Participant<T: UserContext> {
+/// A channel (bidirectional stream) in a room.
+pub struct Channel<T: UserContext> {
+    pub id: ChannelId,
     pub user: T,
-    pub connected_at: Instant,
-    /// Channel to send messages to this participant.
+    pub opened_at: Instant,
+    /// Sender to write messages to this channel.
     pub msg_tx: mpsc::Sender<Vec<u8>>,
 }
 
@@ -106,7 +108,7 @@ impl<T: UserContext> RoomManager<T> {
 
         // Create channels for actor communication
         let (event_tx, event_rx) = mpsc::channel::<RoomEvent<T>>(256);
-        let (outbox_tx, outbox_rx) = mpsc::channel::<Outgoing<T::Id>>(256);
+        let (outbox_tx, outbox_rx) = mpsc::channel::<Outgoing>(256);
 
         let room = Arc::new(Room {
             id,
@@ -114,8 +116,10 @@ impl<T: UserContext> RoomManager<T> {
             created_at: Instant::now(),
             metadata,
             event_tx,
-            participants: RwLock::new(Vec::new()),
-            participant_count: AtomicU32::new(0),
+            channels: RwLock::new(HashMap::new()),
+            user_channels: RwLock::new(HashMap::new()),
+            next_channel_id: AtomicU64::new(1),
+            user_count: AtomicU32::new(0),
             last_activity: RwLock::new(Instant::now()),
             outbox_rx: RwLock::new(Some(outbox_rx)),
         });
@@ -156,7 +160,7 @@ impl<T: UserContext> RoomManager<T> {
     pub fn get_room_info(&self, room_id: RoomId) -> Option<RoomInfo> {
         self.rooms.get(&room_id).map(|room| RoomInfo {
             id: room.id,
-            player_count: room.participant_count.load(Ordering::Relaxed),
+            player_count: room.user_count.load(Ordering::Relaxed),
             max_players: None,
             created_at: room.created_at.elapsed().as_secs(),
             metadata: room.metadata.clone(),
@@ -184,7 +188,7 @@ impl<T: UserContext> RoomManager<T> {
         for entry in self.rooms.iter() {
             let room = entry.value();
             let age = now.duration_since(room.created_at);
-            let participant_count = room.participant_count.load(Ordering::Relaxed);
+            let user_count = room.user_count.load(Ordering::Relaxed);
             let last_activity = *room.last_activity.read().await;
             let idle_time = now.duration_since(last_activity);
 
@@ -195,13 +199,13 @@ impl<T: UserContext> RoomManager<T> {
             }
 
             // No one ever connected
-            if participant_count == 0 && age > self.config.first_connect_timeout {
+            if user_count == 0 && age > self.config.first_connect_timeout {
                 to_remove.push(*entry.key());
                 continue;
             }
 
             // Was active but now empty
-            if participant_count == 0 && idle_time > self.config.empty_timeout {
+            if user_count == 0 && idle_time > self.config.empty_timeout {
                 to_remove.push(*entry.key());
             }
         }
@@ -218,90 +222,110 @@ impl<T: UserContext> RoomManager<T> {
 }
 
 impl<T: UserContext> Room<T> {
-    /// Add a participant to the room with their message channel.
-    pub async fn add_participant(&self, user: T, msg_tx: mpsc::Sender<Vec<u8>>) {
-        // Notify actor
-        let _ = self.event_tx.send(RoomEvent::UserJoined(user.clone())).await;
+    /// Open a new channel for a user. Returns the ChannelId.
+    /// Fires UserJoined if this is the user's first channel.
+    /// Fires ChannelOpened for the new channel.
+    pub async fn open_channel(&self, user: T, msg_tx: mpsc::Sender<Vec<u8>>) -> ChannelId {
+        let channel_id = ChannelId(self.next_channel_id.fetch_add(1, Ordering::SeqCst));
+        let user_id = user.id();
 
-        let mut participants = self.participants.write().await;
-        participants.push(Participant {
+        // Check if this is the user's first channel (new user joining)
+        let is_new_user = {
+            let mut user_channels = self.user_channels.write().await;
+            let channels = user_channels.entry(user_id.clone()).or_default();
+            let is_new = channels.is_empty();
+            channels.insert(channel_id);
+            is_new
+        };
+
+        // Fire UserJoined if new user
+        if is_new_user {
+            self.user_count.fetch_add(1, Ordering::Relaxed);
+            let _ = self.event_tx.send(RoomEvent::UserJoined(user.clone())).await;
+        }
+
+        // Fire ChannelOpened
+        let _ = self.event_tx.send(RoomEvent::ChannelOpened {
+            user: user.clone(),
+            channel: channel_id,
+        }).await;
+
+        // Store the channel
+        let mut channels = self.channels.write().await;
+        channels.insert(channel_id, Channel {
+            id: channel_id,
             user,
-            connected_at: Instant::now(),
+            opened_at: Instant::now(),
             msg_tx,
         });
-        self.participant_count.fetch_add(1, Ordering::Relaxed);
+
         *self.last_activity.write().await = Instant::now();
+        channel_id
     }
 
-    /// Remove a participant from the room.
-    pub async fn remove_participant(&self, user_id: &T::Id) {
-        let mut participants = self.participants.write().await;
-        
-        // Find and remove the user, keeping their info for the event
-        let removed_user = participants
-            .iter()
-            .find(|p| &p.user.id() == user_id)
-            .map(|p| p.user.clone());
+    /// Close a channel.
+    /// Fires ChannelClosed.
+    /// Fires UserLeft if this was the user's last channel.
+    pub async fn close_channel(&self, channel_id: ChannelId) {
+        let removed = {
+            let mut channels = self.channels.write().await;
+            channels.remove(&channel_id)
+        };
 
-        let old_len = participants.len();
-        participants.retain(|p| &p.user.id() != user_id);
-        let removed_count = old_len - participants.len();
-        
-        if removed_count > 0 {
-            self.participant_count.fetch_sub(removed_count as u32, Ordering::Relaxed);
+        if let Some(channel) = removed {
+            let user_id = channel.user.id();
+
+            // Fire ChannelClosed
+            let _ = self.event_tx.send(RoomEvent::ChannelClosed {
+                user: channel.user.clone(),
+                channel: channel_id,
+            }).await;
+
+            // Check if this was the user's last channel
+            let is_last_channel = {
+                let mut user_channels = self.user_channels.write().await;
+                if let Some(channels) = user_channels.get_mut(&user_id) {
+                    channels.remove(&channel_id);
+                    channels.is_empty()
+                } else {
+                    true
+                }
+            };
+
+            // Fire UserLeft if last channel
+            if is_last_channel {
+                self.user_count.fetch_sub(1, Ordering::Relaxed);
+                let _ = self.event_tx.send(RoomEvent::UserLeft(channel.user)).await;
+
+                // Clean up user_channels entry
+                let mut user_channels = self.user_channels.write().await;
+                user_channels.remove(&user_id);
+            }
+
+            *self.last_activity.write().await = Instant::now();
         }
-        
-        drop(participants);
-        
-        // Notify actor
-        if let Some(user) = removed_user {
-            let _ = self.event_tx.send(RoomEvent::UserLeft(user)).await;
-        }
-        
-        *self.last_activity.write().await = Instant::now();
     }
 
     /// Send a message event to the actor.
-    pub async fn send_message(&self, sender: T, payload: Vec<u8>) {
-        let _ = self.event_tx.send(RoomEvent::Message { sender, payload }).await;
+    pub async fn send_message(&self, sender: T, channel: ChannelId, payload: Vec<u8>) {
+        let _ = self.event_tx.send(RoomEvent::Message { sender, channel, payload }).await;
         *self.last_activity.write().await = Instant::now();
     }
 
-    /// Get current participants (user data only).
-    pub async fn get_participants(&self) -> Vec<T> {
-        let participants = self.participants.read().await;
-        participants.iter().map(|p| p.user.clone()).collect()
-    }
-
     /// Take the outbox receiver (only call once, when setting up the broadcast task).
-    pub async fn take_outbox_rx(&self) -> Option<mpsc::Receiver<Outgoing<T::Id>>> {
+    pub async fn take_outbox_rx(&self) -> Option<mpsc::Receiver<Outgoing>> {
         self.outbox_rx.write().await.take()
     }
 
-    /// Broadcast a message according to the routing decision.
-    pub async fn broadcast(&self, payload: &[u8], route: Route<T::Id>) {
-        let participants = self.participants.read().await;
+    /// Send a message to channels according to the routing decision.
+    pub async fn send_to_channels(&self, payload: &[u8], route: Route) {
+        let channels = self.channels.read().await;
 
         match route {
-            Route::Broadcast => {
-                // Send to all participants
-                for p in participants.iter() {
-                    let _ = p.msg_tx.send(payload.to_vec()).await;
-                }
-            }
-            Route::Only(ref ids) => {
-                // Send only to specific users
-                for p in participants.iter() {
-                    if ids.contains(&p.user.id()) {
-                        let _ = p.msg_tx.send(payload.to_vec()).await;
-                    }
-                }
-            }
-            Route::AllExcept(ref ids) => {
-                // Send to all except specific users
-                for p in participants.iter() {
-                    if !ids.contains(&p.user.id()) {
-                        let _ = p.msg_tx.send(payload.to_vec()).await;
+            Route::Channels(ref channel_ids) => {
+                for channel_id in channel_ids {
+                    if let Some(channel) = channels.get(channel_id) {
+                        let _ = channel.msg_tx.send(payload.to_vec()).await;
                     }
                 }
             }
@@ -309,5 +333,17 @@ impl<T: UserContext> Room<T> {
                 // Don't send
             }
         }
+    }
+
+    /// Get all current channel IDs.
+    pub async fn get_all_channel_ids(&self) -> Vec<ChannelId> {
+        let channels = self.channels.read().await;
+        channels.keys().copied().collect()
+    }
+
+    /// Get channel IDs for a specific user.
+    pub async fn get_user_channel_ids(&self, user_id: &T::Id) -> Vec<ChannelId> {
+        let user_channels = self.user_channels.read().await;
+        user_channels.get(user_id).map(|s| s.iter().copied().collect()).unwrap_or_default()
     }
 }
