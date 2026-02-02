@@ -1,0 +1,11 @@
+[package]
+name = "chat-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+multiplayer-kit-client = { path = "../../client" }
+multiplayer-kit-helpers = { path = "../../helpers", default-features = false, features = ["client"] }
+multiplayer-kit-protocol = { path = "../../protocol" }
+
+thiserror = "1"

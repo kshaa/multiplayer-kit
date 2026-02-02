@@ -47,7 +47,7 @@ pub use framing::{frame_message, MessageBuffer, FramingError};
 mod channel;
 
 #[cfg(feature = "client")]
-pub use channel::MessageChannel;
+pub use channel::{MessageChannel, MessageChannelError};
 
 #[cfg(feature = "server")]
 mod actor;

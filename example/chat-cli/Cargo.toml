@@ -8,9 +8,9 @@ name = "chat-cli"
 path = "src/main.rs"
 
 [dependencies]
+chat-client = { path = "../chat-client" }
 multiplayer-kit-client = { path = "../../client" }
 multiplayer-kit-protocol = { path = "../../protocol" }
-multiplayer-kit-helpers = { path = "../../helpers" }
 
 tokio = { version = "1", features = ["full", "io-std"] }
 serde = { version = "1", features = ["derive"] }
