@@ -79,31 +79,52 @@ mod wasm {
     use super::*;
     use wasm_bindgen::prelude::*;
     use std::cell::RefCell;
+    use multiplayer_kit_helpers::{frame_message, MessageBuffer};
 
     /// Re-export ApiClient from the core client library for convenience.
     pub use multiplayer_kit_client::wasm_exports::JsApiClient;
 
+    /// Check if WebTransport is supported in the current browser.
+    fn is_webtransport_supported() -> bool {
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("WebTransport"))
+            .map(|v| !v.is_undefined())
+            .unwrap_or(false)
+    }
+
     /// Chat client for JavaScript with automatic message framing.
+    /// 
+    /// Uses separate state for send (channel only) and receive (buffer) to allow
+    /// concurrent send/receive without RefCell conflicts.
     #[wasm_bindgen]
     pub struct JsChatClient {
         conn: RoomConnection,
-        channel: RefCell<MessageChannel>,
+        channel: multiplayer_kit_client::Channel,
+        recv_state: RefCell<RecvState>,
+    }
+
+    struct RecvState {
+        buffer: MessageBuffer,
+        pending: Vec<Vec<u8>>,
+    }
+
+    impl JsChatClient {
+        fn new(conn: RoomConnection, channel: multiplayer_kit_client::Channel) -> Self {
+            Self {
+                conn,
+                channel,
+                recv_state: RefCell::new(RecvState {
+                    buffer: MessageBuffer::new(),
+                    pending: Vec::new(),
+                }),
+            }
+        }
     }
 
     #[wasm_bindgen]
     impl JsChatClient {
-        /// Connect to a chat room.
-        pub async fn connect(
-            url: &str,
-            ticket: &str,
-            room_id: u32,
-        ) -> Result<JsChatClient, JsError> {
-            Self::connect_with_options(url, ticket, room_id, None, false).await
-        }
-
-        /// Connect with options.
+        /// Connect with options (single URL, explicit transport choice).
         /// - cert_hash: Base64 SHA-256 hash for self-signed certs (WebTransport only)
-        /// - use_websocket: If true, use WebSocket instead of WebTransport
+        /// - use_websocket: If true, use WebSocket; if false, use WebTransport
         #[wasm_bindgen(js_name = connectWithOptions)]
         pub async fn connect_with_options(
             url: &str,
@@ -112,14 +133,13 @@ mod wasm {
             cert_hash: Option<String>,
             use_websocket: bool,
         ) -> Result<JsChatClient, JsError> {
-            let config = multiplayer_kit_client::ConnectionConfig {
-                transport: if use_websocket {
-                    multiplayer_kit_client::Transport::WebSocket
-                } else {
-                    multiplayer_kit_client::Transport::WebTransport
-                },
-                cert_hash,
+            let transport = if use_websocket {
+                multiplayer_kit_client::Transport::WebSocket
+            } else {
+                multiplayer_kit_client::Transport::WebTransport
             };
+
+            let config = multiplayer_kit_client::ConnectionConfig { transport, cert_hash };
 
             let conn = RoomConnection::connect_with_config(
                 url,
@@ -135,18 +155,51 @@ mod wasm {
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?;
 
-            Ok(JsChatClient {
-                conn,
-                channel: RefCell::new(MessageChannel::new(channel)),
-            })
+            Ok(JsChatClient::new(conn, channel))
+        }
+
+        /// Connect with auto-detection.
+        /// Provide both URLs - uses WebTransport if supported, otherwise WebSocket.
+        #[wasm_bindgen(js_name = connectAuto)]
+        pub async fn connect_auto(
+            webtransport_url: &str,
+            websocket_url: &str,
+            ticket: &str,
+            room_id: u32,
+            cert_hash: Option<String>,
+        ) -> Result<JsChatClient, JsError> {
+            let (url, transport) = if is_webtransport_supported() {
+                (webtransport_url, multiplayer_kit_client::Transport::WebTransport)
+            } else {
+                (websocket_url, multiplayer_kit_client::Transport::WebSocket)
+            };
+
+            let config = multiplayer_kit_client::ConnectionConfig { transport, cert_hash };
+
+            let conn = RoomConnection::connect_with_config(
+                url,
+                ticket,
+                RoomId(room_id as u64),
+                config,
+            )
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+            let channel = conn
+                .open_channel()
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+
+            Ok(JsChatClient::new(conn, channel))
         }
 
         /// Send a text message (auto-framed).
+        /// Does not borrow recv_state, so safe to call while receive is pending.
         #[wasm_bindgen(js_name = sendText)]
         pub async fn send_text(&self, msg: &str) -> Result<(), JsError> {
+            let framed = frame_message(msg.as_bytes());
             self.channel
-                .borrow()
-                .send(msg.as_bytes())
+                .write(&framed)
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))
         }
@@ -155,14 +208,47 @@ mod wasm {
         /// Returns null if the connection is closed.
         #[wasm_bindgen(js_name = receiveText)]
         pub async fn receive_text(&self) -> Result<Option<String>, JsError> {
-            match self.channel.borrow_mut().recv().await {
-                Ok(Some(data)) => {
-                    String::from_utf8(data)
+            // Check for pending messages first (quick borrow)
+            {
+                let mut state = self.recv_state.borrow_mut();
+                if let Some(msg) = state.pending.pop() {
+                    return String::from_utf8(msg)
                         .map(Some)
-                        .map_err(|e| JsError::new(&format!("Invalid UTF-8: {}", e)))
+                        .map_err(|e| JsError::new(&format!("Invalid UTF-8: {}", e)));
                 }
-                Ok(None) => Ok(None),
-                Err(e) => Err(JsError::new(&e.to_string())),
+            }
+
+            // Read more data - loop until we get a complete message
+            loop {
+                // Read from channel (no borrow held during await)
+                let mut temp_buf = vec![0u8; 64 * 1024];
+                let n = self.channel
+                    .read(&mut temp_buf)
+                    .await
+                    .map_err(|e| JsError::new(&e.to_string()))?;
+
+                if n == 0 {
+                    return Ok(None); // Channel closed
+                }
+
+                // Process the data (quick borrow)
+                {
+                    let mut state = self.recv_state.borrow_mut();
+                    let results: Vec<_> = state.buffer.push(&temp_buf[..n]).collect();
+                    for result in results {
+                        match result {
+                            Ok(msg) => state.pending.push(msg),
+                            Err(e) => return Err(JsError::new(&format!("Framing error: {}", e))),
+                        }
+                    }
+
+                    if let Some(msg) = state.pending.pop() {
+                        return String::from_utf8(msg)
+                            .map(Some)
+                            .map_err(|e| JsError::new(&format!("Invalid UTF-8: {}", e)));
+                    }
+                }
+                // Loop to read more if no complete message yet
             }
         }
 

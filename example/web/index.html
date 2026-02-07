@@ -186,8 +186,9 @@
     <script type="module">
         import init, { JsApiClient, JsChatClient } from './pkg/chat_client.js';
 
-        const SERVER = 'http://127.0.0.1:8080';
-        const SERVER_QUIC = 'https://127.0.0.1:4433';
+        const SERVER_HTTP = 'http://127.0.0.1:8080';
+        const SERVER_WT = 'https://127.0.0.1:4433';
+        const SERVER_WS = 'ws://127.0.0.1:8080';
 
         let api = null;
         let ticket = null;
@@ -205,7 +206,7 @@
 
         // Initialize WASM
         await init();
-        api = new JsApiClient(SERVER);
+        api = new JsApiClient(SERVER_HTTP);
 
         function log(msg, isSystem = false, isSelf = false) {
             const el = document.getElementById('messages');
@@ -299,12 +300,12 @@
             try {
                 log('connecting to room ' + roomId + '...', true);
 
-                chatClient = await JsChatClient.connectWithOptions(
-                    SERVER_QUIC,
+                chatClient = await JsChatClient.connectAuto(
+                    SERVER_WT,
+                    SERVER_WS,
                     ticket,
                     roomId,
-                    certHash,
-                    false // use WebTransport
+                    certHash
                 );
                 
                 inRoom = true;

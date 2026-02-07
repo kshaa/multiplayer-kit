@@ -7,6 +7,17 @@ use multiplayer_kit_protocol::RoomId;
 use wasm_bindgen::prelude::*;
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/// Check if WebTransport is supported in the current browser.
+fn is_webtransport_supported() -> bool {
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("WebTransport"))
+        .map(|v| !v.is_undefined())
+        .unwrap_or(false)
+}
+
+// ============================================================================
 // JsApiClient
 // ============================================================================
 
@@ -149,34 +160,40 @@ pub struct JsRoomConnection {
 
 #[wasm_bindgen]
 impl JsRoomConnection {
-    /// Connect to a room using WebTransport.
+    /// Connect to a room (auto-detects WebTransport/WebSocket).
     pub async fn connect(
         url: &str,
         ticket: &str,
         room_id: u32,
     ) -> Result<JsRoomConnection, JsError> {
-        Self::connect_with_options(url, ticket, room_id, None, false).await
+        Self::connect_with_options(url, ticket, room_id, None, None).await
     }
 
     /// Connect to a room with options.
     /// - cert_hash: Base64 SHA-256 hash for self-signed certs (WebTransport only)
-    /// - use_websocket: If true, use WebSocket instead of WebTransport
+    /// - use_websocket: If true, use WebSocket; if false, use WebTransport; if undefined, auto-detect
     #[wasm_bindgen(js_name = connectWithOptions)]
     pub async fn connect_with_options(
         url: &str,
         ticket: &str,
         room_id: u32,
         cert_hash: Option<String>,
-        use_websocket: bool,
+        use_websocket: Option<bool>,
     ) -> Result<JsRoomConnection, JsError> {
-        let config = crate::ConnectionConfig {
-            transport: if use_websocket {
-                crate::Transport::WebSocket
-            } else {
-                crate::Transport::WebTransport
-            },
-            cert_hash,
+        let transport = match use_websocket {
+            Some(true) => crate::Transport::WebSocket,
+            Some(false) => crate::Transport::WebTransport,
+            None => {
+                // Auto-detect: check if WebTransport is available
+                if is_webtransport_supported() {
+                    crate::Transport::WebTransport
+                } else {
+                    crate::Transport::WebSocket
+                }
+            }
         };
+
+        let config = crate::ConnectionConfig { transport, cert_hash };
 
         let inner = crate::RoomConnection::connect_with_config(url, ticket, RoomId(room_id as u64), config)
             .await

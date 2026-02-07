@@ -122,9 +122,6 @@ impl<T: UserContext + Unpin + 'static> Actor for RoomWsActor<T> {
                     if let Some(info) = room_manager.get_room_info(room_id) {
                         lobby.notify_room_updated(info);
                     }
-
-                    // Send join confirmation
-                    let _ = addr.try_send(RoomMessage(b"joined".to_vec()));
                 });
 
                 self.authenticated = true;

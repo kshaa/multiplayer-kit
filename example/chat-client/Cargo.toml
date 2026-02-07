@@ -14,8 +14,9 @@ multiplayer-kit-protocol = { path = "../../protocol" }
 thiserror = "1"
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
 
 [features]
 default = ["native"]
 native = ["multiplayer-kit-client/native", "multiplayer-kit-helpers/client"]
-wasm = ["multiplayer-kit-client/wasm", "multiplayer-kit-helpers/wasm", "wasm-bindgen", "wasm-bindgen-futures"]
+wasm = ["multiplayer-kit-client/wasm", "multiplayer-kit-helpers/wasm", "wasm-bindgen", "wasm-bindgen-futures", "js-sys"]
