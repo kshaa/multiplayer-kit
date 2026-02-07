@@ -22,20 +22,20 @@
 //! # Example (Server Actor)
 //!
 //! ```ignore
-//! use multiplayer_kit_helpers::{with_framing, MessageContext, MessageEvent};
+//! use multiplayer_kit_helpers::{with_actor, with_framing, RoomContext, MessageContext, MessageEvent, Outgoing, Route};
 //!
 //! Server::builder()
-//!     .room_actor(with_framing(|mut ctx: MessageContext<MyUser>| async move {
+//!     .room_handler(with_actor(with_framing(|mut ctx: MessageContext<MyUser>| async move {
 //!         while let Some(event) = ctx.recv().await {
 //!             match event {
 //!                 MessageEvent::Message { sender, channel, data } => {
 //!                     // `data` is a complete, unframed message
-//!                     ctx.send_to_all_except(channel, &data).await;
+//!                     ctx.send(Outgoing::new(data, Route::AllExcept(channel))).await;
 //!                 }
 //!                 _ => {}
 //!             }
 //!         }
-//!     }))
+//!     })))
 //!     .build()
 //! ```
 
@@ -53,4 +53,9 @@ pub use channel::{MessageChannel, MessageChannelError};
 mod actor;
 
 #[cfg(feature = "server")]
-pub use actor::{with_framing, MessageContext, MessageEvent};
+pub use actor::{
+    with_actor, with_framing,
+    RoomContext, RoomEvent,
+    MessageContext, MessageEvent,
+    Outgoing, Route,
+};

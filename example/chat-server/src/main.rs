@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo run --bin chat-server
 
-use multiplayer_kit_helpers::{with_framing, MessageContext, MessageEvent};
-use multiplayer_kit_protocol::{Outgoing, RejectReason, Route, UserContext};
+use multiplayer_kit_helpers::{with_actor, with_framing, MessageContext, MessageEvent, Outgoing, Route};
+use multiplayer_kit_protocol::{RejectReason, UserContext};
 use multiplayer_kit_server::{AuthRequest, Server};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,8 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("Issued ticket for user: {} (id={})", user.username, user.id);
             Ok(user)
         })
-        // Room actor with automatic message framing via helpers
-        .room_actor(with_framing(chat_room_actor))
+        // Room handler with actor wrapper and message framing via helpers
+        .room_handler(with_actor(with_framing(chat_room_actor)))
         .build()
         .expect("Failed to build server");
 
@@ -92,14 +92,12 @@ async fn chat_room_actor(mut ctx: MessageContext<ChatUser>) {
             Some(MessageEvent::UserJoined(user)) => {
                 tracing::info!("[Room {:?}] {} joined", room_id, user.username);
                 let msg = format!("*** {} joined the chat ***", user.username);
-                let targets = ctx.channels().copied().collect();
-                ctx.send(Outgoing::new(msg.into_bytes(), Route::Channels(targets))).await;
+                ctx.send(Outgoing::new(msg.into_bytes(), Route::All)).await;
             }
             Some(MessageEvent::UserLeft(user)) => {
                 tracing::info!("[Room {:?}] {} left", room_id, user.username);
                 let msg = format!("*** {} left the chat ***", user.username);
-                let targets = ctx.channels().copied().collect();
-                ctx.send(Outgoing::new(msg.into_bytes(), Route::Channels(targets))).await;
+                ctx.send(Outgoing::new(msg.into_bytes(), Route::All)).await;
             }
             Some(MessageEvent::ChannelOpened { user, channel }) => {
                 tracing::debug!("[Room {:?}] Channel {:?} opened by {}", room_id, channel, user.username);
@@ -118,8 +116,7 @@ async fn chat_room_actor(mut ctx: MessageContext<ChatUser>) {
                 tracing::info!("[Room {:?}] {}", room_id, text);
                 
                 // Forward to all OTHER channels (sender has local echo)
-                let targets = ctx.channels().filter(|&&c| c != channel).copied().collect();
-                ctx.send(Outgoing::new(data, Route::Channels(targets))).await;
+                ctx.send(Outgoing::new(data, Route::AllExcept(channel))).await;
             }
             Some(MessageEvent::Shutdown) => {
                 tracing::info!("[Room {:?}] Shutting down", room_id);

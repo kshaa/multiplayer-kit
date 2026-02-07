@@ -10,7 +10,7 @@ pub mod ws;
 use crate::lobby::Lobby;
 use crate::quic::QuicState;
 use crate::rest::AppState;
-use crate::room::{ActorFactory, RoomConfig, RoomManager};
+use crate::room::{RoomConfig, RoomHandlerFactory, RoomManager};
 use crate::ticket::TicketManager;
 use crate::ws::WsState;
 use actix_cors::Cors;
@@ -27,8 +27,8 @@ use wtransport::ServerConfig as WtServerConfig;
 
 pub use builder::ServerBuilder;
 pub use error::ServerError;
-pub use multiplayer_kit_protocol::{ChannelId, Outgoing, RoomEvent, RoomId, Route};
-pub use room::RoomContext;
+pub use multiplayer_kit_protocol::{ChannelId, RoomId};
+pub use room::{Accept, ChannelError, Room, RoomHandle, ServerChannel};
 
 /// Type alias for auth handler boxed future.
 pub type AuthFuture<T> = Pin<Box<dyn Future<Output = Result<T, RejectReason>> + Send>>;
@@ -37,7 +37,7 @@ pub type AuthFuture<T> = Pin<Box<dyn Future<Output = Result<T, RejectReason>> + 
 pub struct Server<T: UserContext + Unpin> {
     config: ServerConfig,
     auth_handler: Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>,
-    actor_factory: ActorFactory<T>,
+    handler_factory: RoomHandlerFactory<T>,
     jwt_secret: Vec<u8>,
     _phantom: PhantomData<T>,
 }
@@ -99,7 +99,7 @@ impl<T: UserContext + Unpin + 'static> Server<T> {
             empty_timeout: Duration::from_secs(self.config.room_empty_timeout_secs),
         };
 
-        let room_manager = Arc::new(RoomManager::<T>::new(room_config, self.actor_factory));
+        let room_manager = Arc::new(RoomManager::<T>::new(room_config, self.handler_factory));
         let ticket_manager = Arc::new(TicketManager::new(&self.jwt_secret));
         let lobby = Arc::new(Lobby::new());
 

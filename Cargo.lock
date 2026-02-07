@@ -1322,6 +1322,7 @@ dependencies = [
  "multiplayer-kit-protocol",
  "multiplayer-kit-server",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 

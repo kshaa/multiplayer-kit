@@ -1,4 +1,4 @@
-use crate::room::{ActorFactory, RoomContext};
+use crate::room::{Room, RoomHandlerFactory};
 use crate::{AuthFuture, AuthRequest, Server, ServerConfig};
 use multiplayer_kit_protocol::{RejectReason, UserContext};
 use std::future::Future;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub struct ServerBuilder<T: UserContext + Unpin> {
     config: ServerConfig,
     auth_handler: Option<Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>>,
-    actor_factory: Option<ActorFactory<T>>,
+    handler_factory: Option<RoomHandlerFactory<T>>,
     jwt_secret: Option<Vec<u8>>,
     _phantom: PhantomData<T>,
 }
@@ -19,7 +19,7 @@ impl<T: UserContext + Unpin> ServerBuilder<T> {
         Self {
             config: ServerConfig::default(),
             auth_handler: None,
-            actor_factory: None,
+            handler_factory: None,
             jwt_secret: None,
             _phantom: PhantomData,
         }
@@ -59,49 +59,52 @@ impl<T: UserContext + Unpin> ServerBuilder<T> {
         self
     }
 
-    /// Set the room actor factory.
+    /// Set the room handler factory.
     /// 
     /// The factory is called for each new room and should return a future
-    /// that runs the room's actor loop. The actor receives events via 
-    /// `ctx.events` and sends messages via `ctx.send()`.
+    /// that runs for the room's lifetime. Accept channels with `room.accept()`,
+    /// read/write to channels, and broadcast with `room.broadcast()`.
     /// 
     /// # Example
     /// ```ignore
-    /// .room_actor(|mut ctx| async move {
-    ///     loop {
-    ///         match ctx.events.recv().await {
-    ///             Some(RoomEvent::UserJoined(user)) => {
-    ///                 ctx.send(Outgoing::broadcast(format!("{} joined", user.name))).await;
+    /// .room_handler(|mut room| async move {
+    ///     while let Some(accept) = room.accept().await {
+    ///         match accept {
+    ///             Accept::NewChannel(user, mut channel) => {
+    ///                 let handle = room.handle();
+    ///                 tokio::spawn(async move {
+    ///                     while let Some(data) = channel.read().await {
+    ///                         handle.broadcast_except(channel.id, &data).await;
+    ///                     }
+    ///                 });
     ///             }
-    ///             Some(RoomEvent::Message { sender, payload }) => {
-    ///                 // Broadcast to all except sender
-    ///                 ctx.send(Outgoing::new(payload, Route::AllExcept(vec![sender.id()]))).await;
+    ///             Accept::Closing => {
+    ///                 room.broadcast(b"Room closing...").await;
+    ///                 break;
     ///             }
-    ///             Some(RoomEvent::Shutdown) | None => break,
-    ///             _ => {}
     ///         }
     ///     }
     /// })
     /// ```
-    pub fn room_actor<F, Fut>(mut self, factory: F) -> Self
+    pub fn room_handler<F, Fut>(mut self, factory: F) -> Self
     where
-        F: Fn(RoomContext<T>) -> Fut + Send + Sync + 'static,
+        F: Fn(Room<T>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        self.actor_factory = Some(Arc::new(move |ctx| Box::pin(factory(ctx))));
+        self.handler_factory = Some(Arc::new(move |room| Box::pin(factory(room))));
         self
     }
 
     /// Build the server.
     pub fn build(self) -> Result<Server<T>, &'static str> {
         let auth_handler = self.auth_handler.ok_or("auth_handler is required")?;
-        let actor_factory = self.actor_factory.ok_or("room_actor is required")?;
+        let handler_factory = self.handler_factory.ok_or("room_handler is required")?;
         let jwt_secret = self.jwt_secret.ok_or("jwt_secret is required")?;
 
         Ok(Server {
             config: self.config,
             auth_handler,
-            actor_factory,
+            handler_factory,
             jwt_secret,
             _phantom: PhantomData,
         })
