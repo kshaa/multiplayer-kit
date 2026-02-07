@@ -194,7 +194,10 @@ impl JsRoomConnection {
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
 
-        Ok(JsChannel { inner: channel })
+        Ok(JsChannel {
+            inner: channel,
+            recv_buffer: std::cell::RefCell::new(Vec::new()),
+        })
     }
 
     /// Get the transport type ("webtransport" or "websocket").
@@ -227,11 +230,12 @@ impl JsRoomConnection {
 #[wasm_bindgen]
 pub struct JsChannel {
     inner: crate::Channel,
+    recv_buffer: std::cell::RefCell<Vec<u8>>,
 }
 
 #[wasm_bindgen]
 impl JsChannel {
-    /// Write data to the channel.
+    /// Write raw data to the channel.
     pub async fn write(&self, data: &[u8]) -> Result<(), JsError> {
         self.inner
             .write(data)
@@ -239,7 +243,7 @@ impl JsChannel {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Read data from the channel. Returns Uint8Array.
+    /// Read raw data from the channel. Returns Uint8Array.
     pub async fn read(&self) -> Result<Vec<u8>, JsError> {
         let mut buf = vec![0u8; 64 * 1024];
         let n = self
@@ -249,6 +253,56 @@ impl JsChannel {
             .map_err(|e| JsError::new(&e.to_string()))?;
         buf.truncate(n);
         Ok(buf)
+    }
+
+    /// Send a text message (auto-framed with length prefix).
+    #[wasm_bindgen(js_name = sendText)]
+    pub async fn send_text(&self, msg: &str) -> Result<(), JsError> {
+        let bytes = msg.as_bytes();
+        let len = (bytes.len() as u32).to_be_bytes();
+        let mut frame = Vec::with_capacity(4 + bytes.len());
+        frame.extend_from_slice(&len);
+        frame.extend_from_slice(bytes);
+        self.inner
+            .write(&frame)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Receive the next complete text message (auto-unframed).
+    /// Returns null if the channel is closed.
+    #[wasm_bindgen(js_name = receiveText)]
+    pub async fn receive_text(&self) -> Result<Option<String>, JsError> {
+        loop {
+            // Try to extract a complete message from buffer
+            {
+                let mut buffer = self.recv_buffer.borrow_mut();
+                if buffer.len() >= 4 {
+                    let len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+                    if buffer.len() >= 4 + len {
+                        let msg_bytes = buffer[4..4 + len].to_vec();
+                        buffer.drain(..4 + len);
+                        let msg = String::from_utf8(msg_bytes)
+                            .map_err(|e| JsError::new(&format!("Invalid UTF-8: {}", e)))?;
+                        return Ok(Some(msg));
+                    }
+                }
+            }
+
+            // Read more data
+            let mut buf = vec![0u8; 64 * 1024];
+            let n = self
+                .inner
+                .read(&mut buf)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            
+            if n == 0 {
+                return Ok(None); // Channel closed
+            }
+
+            self.recv_buffer.borrow_mut().extend_from_slice(&buf[..n]);
+        }
     }
 
     /// Check if connected.

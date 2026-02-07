@@ -327,12 +327,11 @@
         async function receiveLoop() {
             while (inRoom && chatChannel) {
                 try {
-                    const data = await chatChannel.read();
-                    if (!data || data.length === 0) {
+                    const msg = await chatChannel.receiveText();
+                    if (msg === null) {
                         break;
                     }
-                    // Process received data (may contain partial messages)
-                    handleReceivedData(data);
+                    log(msg);
                 } catch (e) {
                     if (inRoom) {
                         log('connection lost: ' + e.message, true);
@@ -349,31 +348,6 @@
             }
         }
 
-        // Buffer for message reassembly
-        let recvBuffer = new Uint8Array(0);
-
-        function handleReceivedData(data) {
-            // Append to buffer
-            const newBuf = new Uint8Array(recvBuffer.length + data.length);
-            newBuf.set(recvBuffer);
-            newBuf.set(data, recvBuffer.length);
-            recvBuffer = newBuf;
-
-            // Try to extract complete messages
-            while (recvBuffer.length >= 4) {
-                const len = (recvBuffer[0] << 24) | (recvBuffer[1] << 16) | (recvBuffer[2] << 8) | recvBuffer[3];
-                if (recvBuffer.length < 4 + len) {
-                    break;
-                }
-
-                const msgBytes = recvBuffer.slice(4, 4 + len);
-                recvBuffer = recvBuffer.slice(4 + len);
-
-                const msg = new TextDecoder().decode(msgBytes);
-                log(msg);
-            }
-        }
-
         function leaveRoom() {
             if (!inRoom) return;
             
@@ -383,7 +357,6 @@
                 chatChannel = null;
             }
             roomConnection = null;
-            recvBuffer = new Uint8Array(0);
             
             setStatus('disconnected');
             log('left room', true);
@@ -406,19 +379,9 @@
             
             // Local echo
             log(msg, false, true);
-            
-            // Frame with length prefix
-            const msgBytes = new TextEncoder().encode(msg);
-            const frame = new Uint8Array(4 + msgBytes.length);
-            const len = msgBytes.length;
-            frame[0] = (len >> 24) & 0xff;
-            frame[1] = (len >> 16) & 0xff;
-            frame[2] = (len >> 8) & 0xff;
-            frame[3] = len & 0xff;
-            frame.set(msgBytes, 4);
 
             try {
-                await chatChannel.write(frame);
+                await chatChannel.sendText(msg);
             } catch (e) {
                 log('send failed: ' + e.message, true);
             }
