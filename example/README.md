@@ -29,10 +29,10 @@ WebTransport at `https://127.0.0.1:4433`:
 
 ## Web Client
 
-Build the WASM client first:
+Build the WASM chat-client first:
 ```bash
-cd /path/to/multiplayer-kit
-wasm-pack build client --target web --out-dir ../example/web/pkg -- --no-default-features --features wasm
+cd example/chat-client
+wasm-pack build --target web --out-dir ../web/pkg --no-default-features --features wasm
 ```
 
 Then serve the web directory:

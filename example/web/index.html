@@ -184,7 +184,7 @@
     </div>
 
     <script type="module">
-        import init, { JsApiClient, JsRoomConnection, JsChannel } from './pkg/multiplayer_kit_client.js';
+        import init, { JsApiClient, JsChatClient } from './pkg/chat_client.js';
 
         const SERVER = 'http://127.0.0.1:8080';
         const SERVER_QUIC = 'https://127.0.0.1:4433';
@@ -193,8 +193,7 @@
         let ticket = null;
         let username = null;
         let certHash = null;
-        let roomConnection = null;
-        let chatChannel = null;
+        let chatClient = null;
         let inRoom = false;
 
         // Make functions available globally
@@ -300,23 +299,18 @@
             try {
                 log('connecting to room ' + roomId + '...', true);
 
-                // Connect with WebTransport + cert hash
-                roomConnection = await JsRoomConnection.connectWithOptions(
+                chatClient = await JsChatClient.connectWithOptions(
                     SERVER_QUIC,
                     ticket,
                     roomId,
                     certHash,
                     false // use WebTransport
                 );
-
-                // Open a channel for chat
-                chatChannel = await roomConnection.openChannel();
                 
                 inRoom = true;
                 setStatus('connected (room ' + roomId + ')', true);
                 log('joined room ' + roomId, true);
 
-                // Start receive loop
                 receiveLoop();
             } catch (e) {
                 log('failed to join room: ' + e.message, true);
@@ -325,12 +319,10 @@
         }
 
         async function receiveLoop() {
-            while (inRoom && chatChannel) {
+            while (inRoom && chatClient) {
                 try {
-                    const msg = await chatChannel.receiveText();
-                    if (msg === null) {
-                        break;
-                    }
+                    const msg = await chatClient.receiveText();
+                    if (msg === null) break;
                     log(msg);
                 } catch (e) {
                     if (inRoom) {
@@ -342,8 +334,7 @@
             
             if (inRoom) {
                 inRoom = false;
-                chatChannel = null;
-                roomConnection = null;
+                chatClient = null;
                 setStatus('disconnected');
             }
         }
@@ -352,18 +343,14 @@
             if (!inRoom) return;
             
             inRoom = false;
-            if (chatChannel) {
-                chatChannel.close().catch(() => {});
-                chatChannel = null;
-            }
-            roomConnection = null;
+            chatClient = null;
             
             setStatus('disconnected');
             log('left room', true);
         }
 
         async function sendMessage() {
-            if (!inRoom || !chatChannel) {
+            if (!inRoom || !chatClient) {
                 log('not in a room', true);
                 return;
             }
@@ -374,14 +361,11 @@
 
             input.value = '';
             
-            // Format: "username: message"
             const msg = `${username}: ${text}`;
-            
-            // Local echo
-            log(msg, false, true);
+            log(msg, false, true); // local echo
 
             try {
-                await chatChannel.sendText(msg);
+                await chatClient.sendText(msg);
             } catch (e) {
                 log('send failed: ' + e.message, true);
             }

@@ -43,10 +43,10 @@ mod framing;
 
 pub use framing::{frame_message, MessageBuffer, FramingError};
 
-#[cfg(feature = "client")]
+#[cfg(any(feature = "client", feature = "wasm"))]
 mod channel;
 
-#[cfg(feature = "client")]
+#[cfg(any(feature = "client", feature = "wasm"))]
 pub use channel::{MessageChannel, MessageChannelError};
 
 #[cfg(feature = "server")]

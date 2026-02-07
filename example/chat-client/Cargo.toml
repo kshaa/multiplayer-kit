@@ -3,9 +3,19 @@ name = "chat-client"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-multiplayer-kit-client = { path = "../../client" }
-multiplayer-kit-helpers = { path = "../../helpers", default-features = false, features = ["client"] }
+multiplayer-kit-client = { path = "../../client", default-features = false }
+multiplayer-kit-helpers = { path = "../../helpers", default-features = false }
 multiplayer-kit-protocol = { path = "../../protocol" }
 
 thiserror = "1"
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
+[features]
+default = ["native"]
+native = ["multiplayer-kit-client/native", "multiplayer-kit-helpers/client"]
+wasm = ["multiplayer-kit-client/wasm", "multiplayer-kit-helpers/wasm", "wasm-bindgen", "wasm-bindgen-futures"]

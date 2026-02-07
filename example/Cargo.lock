@@ -450,6 +450,8 @@ dependencies = [
  "multiplayer-kit-helpers",
  "multiplayer-kit-protocol",
  "thiserror 1.0.69",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
