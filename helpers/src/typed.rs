@@ -398,7 +398,9 @@ mod server {
                 user.id(),
                 expected_channels
             );
-            let _ = event_tx.send(ServerInternalEvent::UserReady(user.clone())).await;
+            let _ = event_tx
+                .send(ServerInternalEvent::UserReady(user.clone()))
+                .await;
         }
 
         // Read messages
@@ -457,7 +459,9 @@ mod server {
                 user.id(),
                 channel_type
             );
-            let _ = event_tx.send(ServerInternalEvent::UserGone(user.clone())).await;
+            let _ = event_tx
+                .send(ServerInternalEvent::UserGone(user.clone()))
+                .await;
         }
     }
 }

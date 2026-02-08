@@ -71,7 +71,11 @@ pub async fn handle_session<T: UserContext, C: RoomConfig>(
             return Err("Room not found".into());
         }
 
-        tracing::info!("[WebTransport] Room {:?} session started: user {:?}", room_id, user.id());
+        tracing::info!(
+            "[WebTransport] Room {:?} session started: user {:?}",
+            room_id,
+            user.id()
+        );
 
         let connection = session_request.accept().await?;
         handle_room_connection(connection, RoomId(room_id), user, state).await

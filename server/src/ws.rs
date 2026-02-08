@@ -122,7 +122,11 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Actor for RoomWs
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
-        tracing::info!("[WebSocket] Room {:?} disconnected: user {:?}", self.room_id, self.user_id);
+        tracing::info!(
+            "[WebSocket] Room {:?} disconnected: user {:?}",
+            self.room_id,
+            self.user_id
+        );
 
         // Close the channel
         if let Some(channel_id) = self.channel_id.take() {
@@ -228,7 +232,12 @@ pub async fn room_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
         return Err(actix_web::error::ErrorNotFound("Room not found or closed"));
     };
 
-    tracing::info!("[WebSocket] Room {:?} channel {:?} connected: user {:?}", room_id, channel_id, user_id);
+    tracing::info!(
+        "[WebSocket] Room {:?} channel {:?} connected: user {:?}",
+        room_id,
+        channel_id,
+        user_id
+    );
 
     // Notify lobby
     if let Some(info) = state.room_manager.get_room_info(room_id) {
@@ -291,7 +300,10 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> LobbyWsActor<T, 
     fn heartbeat(&self, ctx: &mut ws::WebsocketContext<Self>) {
         ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx| {
             if Instant::now().duration_since(act.last_heartbeat) > CLIENT_TIMEOUT {
-                tracing::info!("[WebSocket] Lobby disconnected (timeout): user {:?}", act.user_id);
+                tracing::info!(
+                    "[WebSocket] Lobby disconnected (timeout): user {:?}",
+                    act.user_id
+                );
                 ctx.stop();
                 return;
             }
