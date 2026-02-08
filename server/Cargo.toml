@@ -10,10 +10,12 @@ multiplayer-kit-protocol = { path = "../protocol" }
 tokio = { version = "1", features = ["full"] }
 
 # HTTP/REST/WebSocket
-actix-web = "4"
+actix-web = { version = "4", features = ["rustls-0_23"] }
 actix-cors = "0.7"
 actix-web-actors = "4"
 actix = "0.13"
+rustls = "0.23"
+rustls-pemfile = "2"
 
 # QUIC/WebTransport
 wtransport = "0.6"

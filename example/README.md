@@ -29,9 +29,11 @@ REST API at `http://127.0.0.1:8080`. Ticket is passed via `Authorization: Bearer
 
 WebTransport (QUIC/UDP) at `https://127.0.0.1:8080`:
 - `/room/{id}?ticket=...` - Join room
+- `/lobby` - Live room updates (auth via bi-stream)
 
 WebSocket (TCP) at `ws://127.0.0.1:8080`:
-- `/ws/room/{id}?ticket=...` - Fallback for Safari
+- `/ws/room/{id}?ticket=...` - Join room (fallback for Safari)
+- `/ws/lobby?ticket=...` - Live room updates (fallback for Safari)
 
 ## Web Client
 

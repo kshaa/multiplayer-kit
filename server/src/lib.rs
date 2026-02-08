@@ -55,10 +55,14 @@ pub struct ServerConfig {
     pub room_first_connect_timeout_secs: u64,
     /// Timeout when room becomes empty.
     pub room_empty_timeout_secs: u64,
-    /// TLS certificate PEM file path. If None, generates self-signed cert.
+    /// TLS certificate PEM file path for QUIC. If None, generates self-signed cert.
     pub tls_cert: Option<String>,
-    /// TLS private key PEM file path. Required if tls_cert is set.
+    /// TLS private key PEM file path for QUIC. Required if tls_cert is set.
     pub tls_key: Option<String>,
+    /// TLS certificate PEM file path for HTTP. If None, HTTP runs without TLS.
+    pub http_tls_cert: Option<String>,
+    /// TLS private key PEM file path for HTTP. Required if http_tls_cert is set.
+    pub http_tls_key: Option<String>,
     /// Hostnames/IPs for self-signed cert. Default: ["localhost", "127.0.0.1"].
     /// Only used when tls_cert is None.
     pub self_signed_hosts: Vec<String>,
@@ -79,6 +83,8 @@ impl ServerConfig {
             room_empty_timeout_secs: 300,          // 5 minutes
             tls_cert: None,
             tls_key: None,
+            http_tls_cert: None,
+            http_tls_key: None,
             self_signed_hosts: vec!["localhost".to_string(), "127.0.0.1".to_string()],
             ticket_expiry_secs: 3600, // 1 hour
             cors_origins: vec![],     // Empty = derive from self_signed_hosts
@@ -233,7 +239,10 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
 
         // Start HTTP server
         let http_addr = self.config.http_addr.clone();
-        let http_server = HttpServer::new(move || {
+        let http_tls_cert = self.config.http_tls_cert.clone();
+        let http_tls_key = self.config.http_tls_key.clone();
+
+        let http_server_builder = HttpServer::new(move || {
             let cors = if cors_origins.iter().any(|o| o == "*") {
                 Cors::permissive()
             } else {
@@ -256,11 +265,34 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
                 .route("/rooms/{id}", web::delete().to(rest::delete_room::<T, C>))
                 .route("/quickplay", web::post().to(rest::quickplay::<T, C>))
                 .route("/cert-hash", web::get().to(rest::get_cert_hash::<T, C>))
-                // WebSocket endpoint for rooms
+                // WebSocket endpoints
                 .route("/ws/room/{id}", web::get().to(ws::room_ws::<T, C>))
-        })
-        .bind(&http_addr)?
-        .run();
+                .route("/ws/lobby", web::get().to(ws::lobby_ws::<T, C>))
+        });
+
+        // Bind with or without TLS
+        let http_server = match (&http_tls_cert, &http_tls_key) {
+            (Some(cert), Some(key)) => {
+                tracing::info!("HTTP server with TLS on {}", http_addr);
+                http_server_builder
+                    .bind_rustls_0_23(&http_addr, load_rustls_config(cert, key)?)?
+                    .run()
+            }
+            (Some(_), None) => {
+                return Err(ServerError::Config(
+                    "http_tls_cert specified without http_tls_key".into(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(ServerError::Config(
+                    "http_tls_key specified without http_tls_cert".into(),
+                ));
+            }
+            (None, None) => {
+                tracing::info!("HTTP server (no TLS) on {}", http_addr);
+                http_server_builder.bind(&http_addr)?.run()
+            }
+        };
 
         // Start QUIC server
         let quic_addr = self.config.quic_addr.clone();
@@ -305,4 +337,37 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
 
         Ok(())
     }
+}
+
+/// Load rustls config from PEM files for HTTP TLS.
+fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerConfig, ServerError> {
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let cert_file = File::open(cert_path)
+        .map_err(|e| ServerError::Config(format!("Failed to open cert file: {}", e)))?;
+    let key_file = File::open(key_path)
+        .map_err(|e| ServerError::Config(format!("Failed to open key file: {}", e)))?;
+
+    let mut cert_reader = BufReader::new(cert_file);
+    let mut key_reader = BufReader::new(key_file);
+
+    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if certs.is_empty() {
+        return Err(ServerError::Config("No certificates found in cert file".into()));
+    }
+
+    let key = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|e| ServerError::Config(format!("Failed to read private key: {}", e)))?
+        .ok_or_else(|| ServerError::Config("No private key found in key file".into()))?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| ServerError::Config(format!("Failed to build TLS config: {}", e)))?;
+
+    Ok(config)
 }

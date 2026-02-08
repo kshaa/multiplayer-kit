@@ -56,10 +56,24 @@ impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
         self
     }
 
-    /// Set TLS private key PEM file path.
+    /// Set TLS private key PEM file path for QUIC.
     /// Required if tls_cert is set.
     pub fn tls_key(mut self, path: impl Into<String>) -> Self {
         self.config.tls_key = Some(path.into());
+        self
+    }
+
+    /// Set TLS certificate PEM file path for HTTP server.
+    /// If not set, HTTP runs without TLS (plain HTTP).
+    pub fn http_tls_cert(mut self, path: impl Into<String>) -> Self {
+        self.config.http_tls_cert = Some(path.into());
+        self
+    }
+
+    /// Set TLS private key PEM file path for HTTP server.
+    /// Required if http_tls_cert is set.
+    pub fn http_tls_key(mut self, path: impl Into<String>) -> Self {
+        self.config.http_tls_key = Some(path.into());
         self
     }
 

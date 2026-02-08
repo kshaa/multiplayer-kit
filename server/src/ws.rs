@@ -250,3 +250,138 @@ pub async fn room_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
 pub struct WsQuery {
     pub ticket: String,
 }
+
+// ============================================================================
+// Lobby WebSocket
+// ============================================================================
+
+use multiplayer_kit_protocol::LobbyEvent;
+use tokio::sync::broadcast;
+
+/// WebSocket actor for lobby updates.
+pub struct LobbyWsActor<T: UserContext + 'static, C: RoomConfig + 'static> {
+    room_manager: Arc<RoomManager<T, C>>,
+    lobby_rx: Option<broadcast::Receiver<LobbyEvent>>,
+    last_heartbeat: Instant,
+}
+
+/// Message for lobby events.
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct LobbyMessage(pub Vec<u8>);
+
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> LobbyWsActor<T, C> {
+    pub fn new(
+        room_manager: Arc<RoomManager<T, C>>,
+        lobby_rx: broadcast::Receiver<LobbyEvent>,
+    ) -> Self {
+        Self {
+            room_manager,
+            lobby_rx: Some(lobby_rx),
+            last_heartbeat: Instant::now(),
+        }
+    }
+
+    fn heartbeat(&self, ctx: &mut ws::WebsocketContext<Self>) {
+        ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx| {
+            if Instant::now().duration_since(act.last_heartbeat) > CLIENT_TIMEOUT {
+                tracing::debug!("Lobby WebSocket client heartbeat timeout");
+                ctx.stop();
+                return;
+            }
+            ctx.ping(b"");
+        });
+    }
+
+    fn start_lobby_listener(&mut self, ctx: &mut ws::WebsocketContext<Self>) {
+        if let Some(mut lobby_rx) = self.lobby_rx.take() {
+            let addr = ctx.address();
+            actix::spawn(async move {
+                loop {
+                    match lobby_rx.recv().await {
+                        Ok(event) => {
+                            if let Ok(bytes) = bincode::serialize(&event) {
+                                if addr.try_send(LobbyMessage(bytes)).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    }
+                }
+            });
+        }
+    }
+}
+
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Actor for LobbyWsActor<T, C> {
+    type Context = ws::WebsocketContext<Self>;
+
+    fn started(&mut self, ctx: &mut Self::Context) {
+        self.heartbeat(ctx);
+
+        // Send initial snapshot
+        let rooms = self.room_manager.get_all_rooms();
+        let snapshot = LobbyEvent::Snapshot(rooms);
+        if let Ok(bytes) = bincode::serialize(&snapshot) {
+            ctx.binary(bytes);
+        }
+
+        self.start_lobby_listener(ctx);
+    }
+}
+
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<LobbyMessage>
+    for LobbyWsActor<T, C>
+{
+    type Result = ();
+
+    fn handle(&mut self, msg: LobbyMessage, ctx: &mut Self::Context) {
+        ctx.binary(msg.0);
+    }
+}
+
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>
+    StreamHandler<Result<ws::Message, ws::ProtocolError>> for LobbyWsActor<T, C>
+{
+    fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
+        match msg {
+            Ok(ws::Message::Ping(msg)) => {
+                self.last_heartbeat = Instant::now();
+                ctx.pong(&msg);
+            }
+            Ok(ws::Message::Pong(_)) => {
+                self.last_heartbeat = Instant::now();
+            }
+            Ok(ws::Message::Close(reason)) => {
+                tracing::debug!("Lobby WebSocket close: {:?}", reason);
+                ctx.stop();
+            }
+            _ => (),
+        }
+    }
+}
+
+/// HTTP handler to upgrade to WebSocket for lobby.
+pub async fn lobby_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
+    req: HttpRequest,
+    stream: web::Payload,
+    query: web::Query<WsQuery>,
+    state: web::Data<WsState<T, C>>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let ticket = &query.ticket;
+
+    // Validate ticket
+    let _user: T = state
+        .ticket_manager
+        .validate(ticket)
+        .map_err(|_| actix_web::error::ErrorUnauthorized("Invalid ticket"))?;
+
+    tracing::info!("WebSocket lobby connection");
+
+    let lobby_rx = state.lobby.subscribe();
+    let actor = LobbyWsActor::new(Arc::clone(&state.room_manager), lobby_rx);
+
+    ws::start(actor, &req, stream)
+}

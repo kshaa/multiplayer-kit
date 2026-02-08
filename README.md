@@ -73,8 +73,12 @@ wss://game.example.com:443    → WebSocket (TCP)
 Server::builder()
     .http_addr("0.0.0.0:443")
     .quic_addr("0.0.0.0:443")
+    // QUIC TLS (required)
     .tls_cert("/etc/letsencrypt/live/game.example.com/fullchain.pem")
     .tls_key("/etc/letsencrypt/live/game.example.com/privkey.pem")
+    // HTTP TLS (optional but recommended for production)
+    .http_tls_cert("/etc/letsencrypt/live/game.example.com/fullchain.pem")
+    .http_tls_key("/etc/letsencrypt/live/game.example.com/privkey.pem")
     // ...
 ```
 
