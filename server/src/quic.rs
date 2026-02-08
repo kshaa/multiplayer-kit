@@ -26,7 +26,7 @@ pub async fn handle_session<T: UserContext, C: RoomConfig>(
     let session_request = incoming.await?;
     let path = session_request.path().to_string();
 
-    tracing::info!("Incoming session for path: {}", path);
+    tracing::debug!("Incoming session for path: {}", path);
 
     if path.starts_with("/lobby") {
         // Parse: /lobby?ticket=...
@@ -39,15 +39,15 @@ pub async fn handle_session<T: UserContext, C: RoomConfig>(
             .ok_or("Missing ticket query parameter")?;
 
         // Validate ticket before accepting connection
-        let _user: T = state.ticket_manager.validate(ticket).map_err(|e| {
+        let user: T = state.ticket_manager.validate(ticket).map_err(|e| {
             tracing::warn!("Invalid ticket for lobby: {:?}", e);
             e
         })?;
 
-        tracing::info!("Lobby client authenticated");
+        tracing::info!("[WebTransport] Lobby connected: user {:?}", user.id());
 
         let connection = session_request.accept().await?;
-        handle_lobby_connection(connection, state).await
+        handle_lobby_connection(connection, user, state).await
     } else if path.starts_with("/room/") {
         // Parse: /room/{id}?ticket=...
         let (room_part, query) = path.split_once('?').unwrap_or((&path, ""));
@@ -71,7 +71,7 @@ pub async fn handle_session<T: UserContext, C: RoomConfig>(
             return Err("Room not found".into());
         }
 
-        tracing::info!("Room client authenticated, joining room {:?}", room_id);
+        tracing::info!("[WebTransport] Room {:?} session started: user {:?}", room_id, user.id());
 
         let connection = session_request.accept().await?;
         handle_room_connection(connection, RoomId(room_id), user, state).await
@@ -84,6 +84,7 @@ pub async fn handle_session<T: UserContext, C: RoomConfig>(
 /// Handle a lobby WebTransport connection (already authenticated via query param).
 async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
     connection: Connection,
+    user: T,
     state: Arc<QuicState<T, C>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Open a unidirectional stream to send lobby events
@@ -103,7 +104,7 @@ async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
                 match event {
                     Ok(event) => {
                         if let Err(e) = write_json_message(&mut send_stream, &event).await {
-                            tracing::debug!("Lobby client disconnected: {:?}", e);
+                            tracing::info!("[WebTransport] Lobby disconnected: user {:?} ({:?})", user.id(), e);
                             break;
                         }
                     }
@@ -112,7 +113,7 @@ async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
                 }
             }
             _ = connection.closed() => {
-                tracing::debug!("Lobby connection closed");
+                tracing::info!("[WebTransport] Lobby disconnected: user {:?}", user.id());
                 break;
             }
         }
@@ -152,6 +153,8 @@ async fn handle_room_connection<T: UserContext, C: RoomConfig>(
                             break;
                         };
 
+                        tracing::info!("[WebTransport] Room {:?} channel {:?} connected: user {:?}", room_id, channel_id, user.id());
+
                         // Notify lobby of player count change
                         if let Some(info) = state.room_manager.get_room_info(room_id) {
                             state.lobby.notify_room_updated(info);
@@ -175,7 +178,7 @@ async fn handle_room_connection<T: UserContext, C: RoomConfig>(
                 }
             }
             _ = connection.closed() => {
-                tracing::debug!("Room connection closed");
+                tracing::info!("[WebTransport] Room {:?} disconnected: user {:?}", room_id, user.id());
                 break;
             }
         }

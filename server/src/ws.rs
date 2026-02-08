@@ -27,6 +27,7 @@ pub struct WsState<T: UserContext, C: RoomConfig> {
 /// WebSocket actor for a room channel.
 pub struct RoomWsActor<T: UserContext + 'static, C: RoomConfig + 'static> {
     room_id: RoomId,
+    user_id: T::Id,
     room_manager: Arc<RoomManager<T, C>>,
     lobby: Arc<Lobby>,
     /// Channel ID (set after channel opens).
@@ -53,6 +54,7 @@ pub struct ChannelClosed;
 impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> RoomWsActor<T, C> {
     pub fn new(
         room_id: RoomId,
+        user_id: T::Id,
         room_manager: Arc<RoomManager<T, C>>,
         lobby: Arc<Lobby>,
         channel_id: ChannelId,
@@ -62,6 +64,7 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> RoomWsActor<T, C
     ) -> Self {
         Self {
             room_id,
+            user_id,
             room_manager,
             lobby,
             channel_id: Some(channel_id),
@@ -77,7 +80,7 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> RoomWsActor<T, C
             HEARTBEAT_INTERVAL,
             |act, ctx: &mut ws::WebsocketContext<Self>| {
                 if Instant::now().duration_since(act.last_heartbeat) > CLIENT_TIMEOUT {
-                    tracing::debug!("WebSocket client heartbeat timeout");
+                    // stopped() will log the disconnect
                     ctx.stop();
                     return;
                 }
@@ -119,6 +122,8 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Actor for RoomWs
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
+        tracing::info!("[WebSocket] Room {:?} disconnected: user {:?}", self.room_id, self.user_id);
+
         // Close the channel
         if let Some(channel_id) = self.channel_id.take() {
             let room_id = self.room_id;
@@ -189,8 +194,7 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>
                     });
                 }
             }
-            Ok(ws::Message::Close(reason)) => {
-                tracing::debug!("WebSocket close: {:?}", reason);
+            Ok(ws::Message::Close(_)) => {
                 ctx.stop();
             }
             _ => (),
@@ -215,11 +219,7 @@ pub async fn room_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
         .validate(ticket)
         .map_err(|_| actix_web::error::ErrorUnauthorized("Invalid ticket"))?;
 
-    tracing::info!(
-        "WebSocket room connection for {:?} by user {:?}",
-        room_id,
-        user.id()
-    );
+    let user_id = user.id();
 
     // Open channel via room manager
     let channel_result = state.room_manager.open_channel(room_id, user).await;
@@ -228,6 +228,8 @@ pub async fn room_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
         return Err(actix_web::error::ErrorNotFound("Room not found or closed"));
     };
 
+    tracing::info!("[WebSocket] Room {:?} channel {:?} connected: user {:?}", room_id, channel_id, user_id);
+
     // Notify lobby
     if let Some(info) = state.room_manager.get_room_info(room_id) {
         state.lobby.notify_room_updated(info);
@@ -235,6 +237,7 @@ pub async fn room_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
 
     let actor = RoomWsActor::new(
         room_id,
+        user_id,
         Arc::clone(&state.room_manager),
         Arc::clone(&state.lobby),
         channel_id,
@@ -260,6 +263,7 @@ use tokio::sync::broadcast;
 
 /// WebSocket actor for lobby updates.
 pub struct LobbyWsActor<T: UserContext + 'static, C: RoomConfig + 'static> {
+    user_id: T::Id,
     room_manager: Arc<RoomManager<T, C>>,
     lobby_rx: Option<broadcast::Receiver<LobbyEvent>>,
     last_heartbeat: Instant,
@@ -272,10 +276,12 @@ pub struct LobbyMessage(pub Vec<u8>);
 
 impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> LobbyWsActor<T, C> {
     pub fn new(
+        user_id: T::Id,
         room_manager: Arc<RoomManager<T, C>>,
         lobby_rx: broadcast::Receiver<LobbyEvent>,
     ) -> Self {
         Self {
+            user_id,
             room_manager,
             lobby_rx: Some(lobby_rx),
             last_heartbeat: Instant::now(),
@@ -285,7 +291,7 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> LobbyWsActor<T, 
     fn heartbeat(&self, ctx: &mut ws::WebsocketContext<Self>) {
         ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx| {
             if Instant::now().duration_since(act.last_heartbeat) > CLIENT_TIMEOUT {
-                tracing::debug!("Lobby WebSocket client heartbeat timeout");
+                tracing::info!("[WebSocket] Lobby disconnected (timeout): user {:?}", act.user_id);
                 ctx.stop();
                 return;
             }
@@ -355,8 +361,8 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>
             Ok(ws::Message::Pong(_)) => {
                 self.last_heartbeat = Instant::now();
             }
-            Ok(ws::Message::Close(reason)) => {
-                tracing::debug!("Lobby WebSocket close: {:?}", reason);
+            Ok(ws::Message::Close(_)) => {
+                tracing::info!("[WebSocket] Lobby disconnected: user {:?}", self.user_id);
                 ctx.stop();
             }
             _ => (),
@@ -374,15 +380,15 @@ pub async fn lobby_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>
     let ticket = &query.ticket;
 
     // Validate ticket
-    let _user: T = state
+    let user: T = state
         .ticket_manager
         .validate(ticket)
         .map_err(|_| actix_web::error::ErrorUnauthorized("Invalid ticket"))?;
 
-    tracing::info!("WebSocket lobby connection");
+    tracing::info!("[WebSocket] Lobby connected: user {:?}", user.id());
 
     let lobby_rx = state.lobby.subscribe();
-    let actor = LobbyWsActor::new(Arc::clone(&state.room_manager), lobby_rx);
+    let actor = LobbyWsActor::new(user.id(), Arc::clone(&state.room_manager), lobby_rx);
 
     ws::start(actor, &req, stream)
 }

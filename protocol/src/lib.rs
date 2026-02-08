@@ -6,7 +6,7 @@ use std::hash::Hash;
 pub trait UserContext:
     Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static
 {
-    type Id: Eq + Hash + Clone + Send + Sync + 'static + std::fmt::Debug;
+    type Id: Eq + Hash + Clone + Send + Sync + Unpin + 'static + std::fmt::Debug;
     fn id(&self) -> Self::Id;
 }
 

@@ -56,7 +56,7 @@ pub enum EncodeError {
 /// ```
 pub trait TypedProtocol: Send + Sync + 'static {
     /// Channel identifier enum.
-    type Channel: Copy + Eq + std::hash::Hash + Send + Sync + 'static;
+    type Channel: Copy + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync + 'static;
 
     /// Unified event enum (wraps all channel message types).
     type Event: Send + 'static;
@@ -102,8 +102,6 @@ mod server {
         /// Message received.
         Message {
             sender: T,
-            /// The specific channel ID this message came from.
-            channel_id: ChannelId,
             /// The channel type (e.g., Chat, GameState).
             channel: P::Channel,
             event: P::Event,
@@ -199,7 +197,6 @@ mod server {
         UserGone(T),
         Message {
             sender: T,
-            channel_id: ChannelId,
             channel_type: P::Channel,
             event: P::Event,
         },
@@ -302,12 +299,11 @@ mod server {
                         Some(ServerInternalEvent::UserGone(user)) => {
                             actor_fn(ctx.clone(), TypedEvent::UserDisconnected(user), Arc::clone(&config)).await;
                         }
-                        Some(ServerInternalEvent::Message { sender, channel_id, channel_type, event }) => {
+                        Some(ServerInternalEvent::Message { sender, channel_type, event }) => {
                             actor_fn(
                                 ctx.clone(),
                                 TypedEvent::Message {
                                     sender,
-                                    channel_id,
                                     channel: channel_type,
                                     event,
                                 },
@@ -338,6 +334,7 @@ mod server {
         expected_channels: usize,
     ) {
         let user_id = user.id();
+        tracing::debug!("Channel {:?} opened for user {:?}", channel_id, user_id);
         let mut buffer = MessageBuffer::new();
 
         // First message identifies channel type
@@ -352,6 +349,12 @@ mod server {
                     Ok(msg) if msg.len() == 1 => {
                         if let Some(ct) = P::channel_from_id(msg[0]) {
                             channel_type = ct;
+                            tracing::info!(
+                                "Channel {:?} identified as {:?} for user {:?}",
+                                channel_id,
+                                channel_type,
+                                user_id
+                            );
                             break 'outer;
                         }
                         tracing::warn!("Unknown channel type: {}", msg[0]);
@@ -389,8 +392,13 @@ mod server {
             }
         };
 
-        if let Some(user) = user_ready {
-            let _ = event_tx.send(ServerInternalEvent::UserReady(user)).await;
+        if let Some(ref user) = user_ready {
+            tracing::info!(
+                "User {:?} fully connected ({} channels established)",
+                user.id(),
+                expected_channels
+            );
+            let _ = event_tx.send(ServerInternalEvent::UserReady(user.clone())).await;
         }
 
         // Read messages
@@ -406,7 +414,6 @@ mod server {
                             let _ = event_tx
                                 .send(ServerInternalEvent::Message {
                                     sender: user.clone(),
-                                    channel_id,
                                     channel_type,
                                     event,
                                 })
@@ -444,8 +451,13 @@ mod server {
             None
         };
 
-        if let Some(user) = user_gone {
-            let _ = event_tx.send(ServerInternalEvent::UserGone(user)).await;
+        if let Some(ref user) = user_gone {
+            tracing::info!(
+                "User {:?} disconnected (channel {:?} closed)",
+                user.id(),
+                channel_type
+            );
+            let _ = event_tx.send(ServerInternalEvent::UserGone(user.clone())).await;
         }
     }
 }
