@@ -1295,6 +1295,7 @@ dependencies = [
 name = "multiplayer-kit-client"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bincode",
  "futures",
  "js-sys",

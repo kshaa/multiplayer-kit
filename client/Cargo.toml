@@ -23,10 +23,11 @@ wtransport = { version = "0.6", features = ["dangerous-configuration"], optional
 reqwest = { version = "0.12", features = ["json"], optional = true }
 tokio-tungstenite = { version = "0.26", optional = true }
 url = { version = "2", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [features]
 default = ["native"]
-native = ["tokio", "wtransport", "reqwest", "tokio-tungstenite", "url"]
+native = ["tokio", "wtransport", "reqwest", "tokio-tungstenite", "url", "base64"]
 wasm = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

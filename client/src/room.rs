@@ -39,7 +39,13 @@ mod native {
         /// Preferred transport (will fallback if unavailable).
         pub transport: Transport,
         /// Base64-encoded SHA-256 cert hash for self-signed certs (WebTransport only).
+        /// If set, only this specific cert is trusted.
         pub cert_hash: Option<String>,
+        /// Whether to validate TLS certificates (native only).
+        /// - `true`: Use system CA store (production with real certs)
+        /// - `false`: Skip validation (development only!)
+        /// Ignored if `cert_hash` is set (hash pinning takes precedence).
+        pub validate_certs: bool,
     }
 
     impl Default for ConnectionConfig {
@@ -47,6 +53,18 @@ mod native {
             Self {
                 transport: Transport::WebTransport,
                 cert_hash: None,
+                validate_certs: false, // Dev-friendly default
+            }
+        }
+    }
+
+    impl ConnectionConfig {
+        /// Production config with real TLS certs (uses system CA store).
+        pub fn production() -> Self {
+            Self {
+                transport: Transport::WebTransport,
+                cert_hash: None,
+                validate_certs: true,
             }
         }
     }
@@ -77,7 +95,7 @@ mod native {
         ) -> Result<Self, ClientError> {
             match config.transport {
                 Transport::WebTransport => {
-                    Self::connect_webtransport(url, ticket, room_id, config.cert_hash).await
+                    Self::connect_webtransport(url, ticket, room_id, config.cert_hash, config.validate_certs).await
                 }
                 Transport::WebSocket => {
                     Self::connect_websocket(url, ticket, room_id).await
@@ -89,15 +107,47 @@ mod native {
             url: &str,
             ticket: &str,
             room_id: RoomId,
-            _cert_hash: Option<String>,
+            cert_hash: Option<String>,
+            validate_certs: bool,
         ) -> Result<Self, ClientError> {
-            let wt_config = wtransport::ClientConfig::builder()
-                .with_bind_default()
-                .with_no_cert_validation()
-                .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
-                .max_idle_timeout(Some(std::time::Duration::from_secs(30)))
-                .expect("valid idle timeout")
-                .build();
+            // Build TLS config based on options
+            let wt_config = if let Some(hash_b64) = cert_hash {
+                // Pin specific cert hash (self-signed production)
+                use base64::Engine;
+                let hash_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&hash_b64)
+                    .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("Invalid cert hash: {}", e))))?;
+                
+                wtransport::ClientConfig::builder()
+                    .with_bind_default()
+                    .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(
+                        hash_bytes.try_into().map_err(|_| {
+                            ClientError::Connection(ConnectionError::Transport("Cert hash must be 32 bytes".into()))
+                        })?
+                    )])
+                    .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
+                    .max_idle_timeout(Some(std::time::Duration::from_secs(30)))
+                    .expect("valid idle timeout")
+                    .build()
+            } else if validate_certs {
+                // Production: use system CA store
+                wtransport::ClientConfig::builder()
+                    .with_bind_default()
+                    .with_native_certs()
+                    .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
+                    .max_idle_timeout(Some(std::time::Duration::from_secs(30)))
+                    .expect("valid idle timeout")
+                    .build()
+            } else {
+                // Development: skip validation
+                wtransport::ClientConfig::builder()
+                    .with_bind_default()
+                    .with_no_cert_validation()
+                    .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
+                    .max_idle_timeout(Some(std::time::Duration::from_secs(30)))
+                    .expect("valid idle timeout")
+                    .build()
+            };
 
             let endpoint = wtransport::Endpoint::client(wt_config).map_err(|e| {
                 ClientError::Connection(ConnectionError::Transport(e.to_string()))
