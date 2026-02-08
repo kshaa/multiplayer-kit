@@ -133,6 +133,7 @@ async fn chat_actor(
             sender,
             channel: ChatChannel::Chat,
             event: ChatEvent::Chat(ChatMessage::Text { content, .. }),
+            ..
         } => {
             tracing::info!("[Room {:?}] {}: {}", room_id, sender.username, content);
 
@@ -146,6 +147,10 @@ async fn chat_actor(
 
         TypedEvent::Message { .. } => {
             // Ignore other message types (system messages from clients, etc.)
+        }
+
+        TypedEvent::Internal(_) => {
+            // Handle self-sent events (e.g., timers, scheduled tasks)
         }
 
         TypedEvent::Shutdown => {

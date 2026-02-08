@@ -6,7 +6,7 @@
 use crate::lobby::Lobby;
 use dashmap::DashMap;
 use multiplayer_kit_protocol::{ChannelId, RoomConfig, RoomId, RoomInfo, UserContext};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -97,9 +97,9 @@ pub struct Room<T: UserContext> {
 /// Shared room state (for cloning to channel tasks).
 pub struct RoomShared<T: UserContext> {
     /// All active channels for broadcasting.
-    channels: RwLock<HashMap<ChannelId, ChannelBroadcast>>,
+    channels: DashMap<ChannelId, ChannelBroadcast>,
     /// Track which users have channels (for user count).
-    user_channels: RwLock<HashMap<T::Id, HashSet<ChannelId>>>,
+    user_channels: DashMap<T::Id, HashSet<ChannelId>>,
     /// User count.
     user_count: AtomicU32,
     /// Last activity time.
@@ -155,8 +155,8 @@ impl<T: UserContext> Room<T> {
     }
 
     /// Get all channel IDs.
-    pub async fn channel_ids(&self) -> Vec<ChannelId> {
-        self.shared.channels.read().await.keys().copied().collect()
+    pub fn channel_ids(&self) -> Vec<ChannelId> {
+        self.shared.channels.iter().map(|r| *r.key()).collect()
     }
 
     /// Get current user count.
@@ -188,34 +188,43 @@ impl<T: UserContext> RoomHandle<T> {
     }
 
     /// Get all channel IDs.
-    pub async fn channel_ids(&self) -> Vec<ChannelId> {
-        self.shared.channels.read().await.keys().copied().collect()
+    pub fn channel_ids(&self) -> Vec<ChannelId> {
+        self.shared.channels.iter().map(|r| *r.key()).collect()
     }
 }
 
 impl<T: UserContext> RoomShared<T> {
     async fn broadcast(&self, data: &[u8]) {
-        let channels = self.channels.read().await;
-        for channel in channels.values() {
-            let _ = channel.write_tx.send(data.to_vec()).await;
+        // Collect senders to avoid holding DashMap refs across await
+        let senders: Vec<_> = self
+            .channels
+            .iter()
+            .map(|r| r.value().write_tx.clone())
+            .collect();
+        for tx in senders {
+            let _ = tx.send(data.to_vec()).await;
         }
     }
 
     async fn broadcast_except(&self, exclude: ChannelId, data: &[u8]) {
-        let channels = self.channels.read().await;
-        for (id, channel) in channels.iter() {
-            if *id != exclude {
-                let _ = channel.write_tx.send(data.to_vec()).await;
-            }
+        let senders: Vec<_> = self
+            .channels
+            .iter()
+            .filter(|r| *r.key() != exclude)
+            .map(|r| r.value().write_tx.clone())
+            .collect();
+        for tx in senders {
+            let _ = tx.send(data.to_vec()).await;
         }
     }
 
     async fn send_to(&self, channel_ids: &[ChannelId], data: &[u8]) {
-        let channels = self.channels.read().await;
-        for id in channel_ids {
-            if let Some(channel) = channels.get(id) {
-                let _ = channel.write_tx.send(data.to_vec()).await;
-            }
+        let senders: Vec<_> = channel_ids
+            .iter()
+            .filter_map(|id| self.channels.get(id).map(|r| r.value().write_tx.clone()))
+            .collect();
+        for tx in senders {
+            let _ = tx.send(data.to_vec()).await;
         }
     }
 }
@@ -282,8 +291,8 @@ impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let shared = Arc::new(RoomShared {
-            channels: RwLock::new(HashMap::new()),
-            user_channels: RwLock::new(HashMap::new()),
+            channels: DashMap::new(),
+            user_channels: DashMap::new(),
             user_count: AtomicU32::new(0),
             last_activity: RwLock::new(Instant::now()),
         });
@@ -340,9 +349,8 @@ impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
             // Give handler time to clean up (brief yield)
             tokio::task::yield_now().await;
 
-            // Force close all channels
-            let channels = entry.shared.channels.write().await;
-            drop(channels); // Just drop the lock, senders will be dropped when entry is removed
+            // Force close all channels (clear the DashMap, senders will be dropped when entry is removed)
+            entry.shared.channels.clear();
 
             drop(entry);
             self.rooms.remove(&room_id);
@@ -384,24 +392,25 @@ impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
 
         // Track user for user count
         {
-            let mut user_channels = entry.shared.user_channels.write().await;
-            let is_new_user = !user_channels.contains_key(&user_id);
-            user_channels.entry(user_id).or_default().insert(channel_id);
+            let is_new_user = !entry.shared.user_channels.contains_key(&user_id);
+            entry
+                .shared
+                .user_channels
+                .entry(user_id)
+                .or_default()
+                .insert(channel_id);
             if is_new_user {
                 entry.shared.user_count.fetch_add(1, Ordering::Relaxed);
             }
         }
 
         // Add to broadcast list
-        {
-            let mut channels = entry.shared.channels.write().await;
-            channels.insert(
-                channel_id,
-                ChannelBroadcast {
-                    write_tx: write_tx.clone(),
-                },
-            );
-        }
+        entry.shared.channels.insert(
+            channel_id,
+            ChannelBroadcast {
+                write_tx: write_tx.clone(),
+            },
+        );
 
         // Create ServerChannel for handler
         let server_channel = ServerChannel {
@@ -426,27 +435,19 @@ impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
     pub async fn close_channel(&self, room_id: RoomId, channel_id: ChannelId) {
         if let Some(entry) = self.rooms.get(&room_id) {
             // Remove from broadcast list
-            {
-                let mut channels = entry.shared.channels.write().await;
-                channels.remove(&channel_id);
-            }
+            entry.shared.channels.remove(&channel_id);
 
             // Update user tracking
-            {
-                let mut user_channels = entry.shared.user_channels.write().await;
-                let mut user_to_remove = None;
-
-                for (user_id, channels) in user_channels.iter_mut() {
-                    if channels.remove(&channel_id) && channels.is_empty() {
-                        user_to_remove = Some(user_id.clone());
-                        break;
-                    }
+            let mut user_to_remove = None;
+            for mut user_entry in entry.shared.user_channels.iter_mut() {
+                if user_entry.value_mut().remove(&channel_id) && user_entry.value().is_empty() {
+                    user_to_remove = Some(user_entry.key().clone());
+                    break;
                 }
-
-                if let Some(user_id) = user_to_remove {
-                    user_channels.remove(&user_id);
-                    entry.shared.user_count.fetch_sub(1, Ordering::Relaxed);
-                }
+            }
+            if let Some(user_id) = user_to_remove {
+                entry.shared.user_channels.remove(&user_id);
+                entry.shared.user_count.fetch_sub(1, Ordering::Relaxed);
             }
 
             *entry.shared.last_activity.write().await = Instant::now();

@@ -85,6 +85,7 @@ pub trait TypedProtocol: Send + Sync + 'static {
 mod server {
     use super::*;
     use crate::framing::{MessageBuffer, frame_message};
+    use dashmap::DashMap;
     use multiplayer_kit_protocol::{ChannelId, RoomId, UserContext};
     use std::collections::HashMap;
     use std::marker::PhantomData;
@@ -101,6 +102,9 @@ mod server {
         /// Message received.
         Message {
             sender: T,
+            /// The specific channel ID this message came from.
+            channel_id: ChannelId,
+            /// The channel type (e.g., Chat, GameState).
             channel: P::Channel,
             event: P::Event,
         },
@@ -117,7 +121,7 @@ mod server {
         self_tx: mpsc::Sender<P::Event>,
         handle: multiplayer_kit_server::RoomHandle<T>,
         /// Maps channel_id -> (user, channel_type)
-        user_channels: Arc<tokio::sync::RwLock<HashMap<ChannelId, (T, P::Channel)>>>,
+        user_channels: Arc<DashMap<ChannelId, (T, P::Channel)>>,
         _phantom: PhantomData<P>,
     }
 
@@ -131,12 +135,14 @@ mod server {
         pub async fn broadcast(&self, event: &P::Event) {
             if let Ok((channel_type, data)) = P::encode(event) {
                 let framed = frame_message(&data);
-                let channels = self.user_channels.read().await;
-                for (channel_id, (_, ch_type)) in channels.iter() {
-                    if *ch_type == channel_type {
-                        self.handle.send_to(&[*channel_id], &framed).await;
-                    }
-                }
+                // Collect matching channel IDs to avoid holding DashMap ref across await
+                let channel_ids: Vec<_> = self
+                    .user_channels
+                    .iter()
+                    .filter(|r| r.value().1 == channel_type)
+                    .map(|r| *r.key())
+                    .collect();
+                self.handle.send_to(&channel_ids, &framed).await;
             }
         }
 
@@ -144,12 +150,13 @@ mod server {
         pub async fn broadcast_except(&self, exclude: ChannelId, event: &P::Event) {
             if let Ok((channel_type, data)) = P::encode(event) {
                 let framed = frame_message(&data);
-                let channels = self.user_channels.read().await;
-                for (channel_id, (_, ch_type)) in channels.iter() {
-                    if *ch_type == channel_type && *channel_id != exclude {
-                        self.handle.send_to(&[*channel_id], &framed).await;
-                    }
-                }
+                let channel_ids: Vec<_> = self
+                    .user_channels
+                    .iter()
+                    .filter(|r| r.value().1 == channel_type && *r.key() != exclude)
+                    .map(|r| *r.key())
+                    .collect();
+                self.handle.send_to(&channel_ids, &framed).await;
             }
         }
 
@@ -157,12 +164,13 @@ mod server {
         pub async fn send_to_user(&self, user: &T, event: &P::Event) {
             if let Ok((channel_type, data)) = P::encode(event) {
                 let framed = frame_message(&data);
-                let channels = self.user_channels.read().await;
-                for (channel_id, (ch_user, ch_type)) in channels.iter() {
-                    if *ch_type == channel_type && ch_user.id() == user.id() {
-                        self.handle.send_to(&[*channel_id], &framed).await;
-                    }
-                }
+                let channel_ids: Vec<_> = self
+                    .user_channels
+                    .iter()
+                    .filter(|r| r.value().1 == channel_type && r.value().0.id() == user.id())
+                    .map(|r| *r.key())
+                    .collect();
+                self.handle.send_to(&channel_ids, &framed).await;
             }
         }
 
@@ -179,7 +187,7 @@ mod server {
                 room_id: self.room_id,
                 self_tx: self.self_tx.clone(),
                 handle: self.handle.clone(),
-                user_channels: Arc::clone(&self.user_channels),
+                user_channels: self.user_channels.clone(),
                 _phantom: PhantomData,
             }
         }
@@ -191,7 +199,6 @@ mod server {
         UserGone(T),
         Message {
             sender: T,
-            #[allow(dead_code)]
             channel_id: ChannelId,
             channel_type: P::Channel,
             event: P::Event,
@@ -245,21 +252,18 @@ mod server {
         let (event_tx, mut event_rx) = mpsc::channel::<ServerInternalEvent<T, P>>(256);
         let (self_tx, mut self_rx) = mpsc::channel::<P::Event>(64);
 
-        let user_channels: Arc<tokio::sync::RwLock<HashMap<ChannelId, (T, P::Channel)>>> =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let user_channels: Arc<DashMap<ChannelId, (T, P::Channel)>> = Arc::new(DashMap::new());
 
-        let pending_users: Arc<
-            tokio::sync::RwLock<HashMap<T::Id, (T, HashMap<P::Channel, ChannelId>)>>,
-        > = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let pending_users: Arc<DashMap<T::Id, (T, HashMap<P::Channel, ChannelId>)>> =
+            Arc::new(DashMap::new());
 
-        let connected_users: Arc<tokio::sync::RwLock<HashMap<T::Id, T>>> =
-            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let connected_users: Arc<DashMap<T::Id, T>> = Arc::new(DashMap::new());
 
         let ctx = TypedContext {
             room_id: room.room_id(),
             self_tx,
             handle: room.handle(),
-            user_channels: Arc::clone(&user_channels),
+            user_channels: user_channels.clone(),
             _phantom: PhantomData,
         };
 
@@ -298,11 +302,12 @@ mod server {
                         Some(ServerInternalEvent::UserGone(user)) => {
                             actor_fn(ctx.clone(), TypedEvent::UserDisconnected(user), Arc::clone(&config)).await;
                         }
-                        Some(ServerInternalEvent::Message { sender, channel_id: _, channel_type, event }) => {
+                        Some(ServerInternalEvent::Message { sender, channel_id, channel_type, event }) => {
                             actor_fn(
                                 ctx.clone(),
                                 TypedEvent::Message {
                                     sender,
+                                    channel_id,
                                     channel: channel_type,
                                     event,
                                 },
@@ -327,11 +332,9 @@ mod server {
         user: T,
         channel_id: ChannelId,
         event_tx: mpsc::Sender<ServerInternalEvent<T, P>>,
-        user_channels: Arc<tokio::sync::RwLock<HashMap<ChannelId, (T, P::Channel)>>>,
-        pending_users: Arc<
-            tokio::sync::RwLock<HashMap<T::Id, (T, HashMap<P::Channel, ChannelId>)>>,
-        >,
-        connected_users: Arc<tokio::sync::RwLock<HashMap<T::Id, T>>>,
+        user_channels: Arc<DashMap<ChannelId, (T, P::Channel)>>,
+        pending_users: Arc<DashMap<T::Id, (T, HashMap<P::Channel, ChannelId>)>>,
+        connected_users: Arc<DashMap<T::Id, T>>,
         expected_channels: usize,
     ) {
         let user_id = user.id();
@@ -367,25 +370,19 @@ mod server {
         }
 
         // Register channel
-        {
-            let mut uc = user_channels.write().await;
-            uc.insert(channel_id, (user.clone(), channel_type));
-        }
+        user_channels.insert(channel_id, (user.clone(), channel_type));
 
         // Track for user connection status
         let user_ready = {
-            let mut pending = pending_users.write().await;
-            let entry = pending
+            let mut entry = pending_users
                 .entry(user_id.clone())
                 .or_insert_with(|| (user.clone(), HashMap::new()));
             entry.1.insert(channel_type, channel_id);
 
             if entry.1.len() >= expected_channels {
-                let (user, _) = pending.remove(&user_id).unwrap();
-                connected_users
-                    .write()
-                    .await
-                    .insert(user_id.clone(), user.clone());
+                drop(entry); // Release DashMap ref before remove
+                let (_, (user, _)) = pending_users.remove(&user_id).unwrap();
+                connected_users.insert(user_id.clone(), user.clone());
                 Some(user)
             } else {
                 None
@@ -428,30 +425,23 @@ mod server {
         }
 
         // Channel closed - remove from tracking
-        {
-            let mut uc = user_channels.write().await;
-            uc.remove(&channel_id);
-        }
+        user_channels.remove(&channel_id);
 
         // Check if user is now disconnected
-        let user_gone = {
-            let mut connected = connected_users.write().await;
-            if connected.remove(&user_id).is_some() {
-                let mut uc = user_channels.write().await;
-                let to_remove: Vec<_> = uc
-                    .iter()
-                    .filter(|(_, (u, _))| u.id() == user_id)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for id in to_remove {
-                    uc.remove(&id);
-                }
-                Some(user.clone())
-            } else {
-                let mut pending = pending_users.write().await;
-                pending.remove(&user_id);
-                None
+        let user_gone = if connected_users.remove(&user_id).is_some() {
+            // Remove all remaining channels for this user
+            let to_remove: Vec<_> = user_channels
+                .iter()
+                .filter(|r| r.value().0.id() == user_id)
+                .map(|r| *r.key())
+                .collect();
+            for id in to_remove {
+                user_channels.remove(&id);
             }
+            Some(user.clone())
+        } else {
+            pending_users.remove(&user_id);
+            None
         };
 
         if let Some(user) = user_gone {

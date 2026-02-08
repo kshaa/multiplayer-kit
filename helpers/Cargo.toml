@@ -10,6 +10,7 @@ multiplayer-kit-server = { path = "../server", optional = true }
 thiserror = "1"
 tracing = "0.1"
 tokio = { version = "1", features = ["sync"], optional = true }
+dashmap = { version = "6", optional = true }
 
 # WASM dependencies
 wasm-bindgen = { version = "0.2", optional = true }
@@ -20,5 +21,5 @@ futures = { version = "0.3", optional = true }
 [features]
 default = ["client", "server"]
 client = ["multiplayer-kit-client", "multiplayer-kit-client/native"]
-server = ["multiplayer-kit-server", "tokio"]
+server = ["multiplayer-kit-server", "tokio", "dashmap"]
 wasm = ["multiplayer-kit-client", "multiplayer-kit-client/wasm", "wasm-bindgen", "wasm-bindgen-futures", "js-sys", "futures"]
