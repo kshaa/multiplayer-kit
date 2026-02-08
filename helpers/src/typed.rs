@@ -104,6 +104,8 @@ mod server {
             channel: P::Channel,
             event: P::Event,
         },
+        /// Internal event sent by actor to itself.
+        Internal(P::Event),
         /// Room is shutting down.
         Shutdown,
     }
@@ -111,6 +113,8 @@ mod server {
     /// Context for server-side typed actor.
     pub struct TypedContext<T: UserContext, P: TypedProtocol> {
         room_id: RoomId,
+        /// Sender to deliver events back to self.
+        self_tx: mpsc::Sender<P::Event>,
         handle: multiplayer_kit_server::RoomHandle<T>,
         /// Maps channel_id -> (user, channel_type)
         user_channels: Arc<tokio::sync::RwLock<HashMap<ChannelId, (T, P::Channel)>>>,
@@ -161,12 +165,19 @@ mod server {
                 }
             }
         }
+
+        /// Get a sender to deliver events back to the actor itself.
+        /// Use this to spawn tasks that can notify the actor later.
+        pub fn self_tx(&self) -> mpsc::Sender<P::Event> {
+            self.self_tx.clone()
+        }
     }
 
     impl<T: UserContext, P: TypedProtocol> Clone for TypedContext<T, P> {
         fn clone(&self) -> Self {
             Self {
                 room_id: self.room_id,
+                self_tx: self.self_tx.clone(),
                 handle: self.handle.clone(),
                 user_channels: Arc::clone(&self.user_channels),
                 _phantom: PhantomData,
@@ -232,6 +243,7 @@ mod server {
         use multiplayer_kit_server::Accept;
 
         let (event_tx, mut event_rx) = mpsc::channel::<ServerInternalEvent<T, P>>(256);
+        let (self_tx, mut self_rx) = mpsc::channel::<P::Event>(64);
 
         let user_channels: Arc<tokio::sync::RwLock<HashMap<ChannelId, (T, P::Channel)>>> =
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
@@ -245,6 +257,7 @@ mod server {
 
         let ctx = TypedContext {
             room_id: room.room_id(),
+            self_tx,
             handle: room.handle(),
             user_channels: Arc::clone(&user_channels),
             _phantom: PhantomData,
@@ -298,6 +311,11 @@ mod server {
                             .await;
                         }
                         None => break,
+                    }
+                }
+                self_event = self_rx.recv() => {
+                    if let Some(event) = self_event {
+                        actor_fn(ctx.clone(), TypedEvent::Internal(event), Arc::clone(&config)).await;
                     }
                 }
             }
