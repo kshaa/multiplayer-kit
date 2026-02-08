@@ -485,8 +485,10 @@ mod client {
     pub enum TypedClientEvent<P: TypedProtocol> {
         /// All channels connected.
         Connected,
-        /// Message received.
+        /// Message received from server.
         Message(P::Event),
+        /// Self-sent event (from ctx.self_tx()).
+        Internal(P::Event),
         /// Disconnected (any channel failed).
         Disconnected,
     }
@@ -494,6 +496,7 @@ mod client {
     /// Context for client-side typed actor.
     pub struct TypedClientContext<P: TypedProtocol> {
         channels: HashMap<P::Channel, mpsc::Sender<Vec<u8>>>,
+        self_tx: mpsc::Sender<P::Event>,
         _phantom: PhantomData<P>,
     }
 
@@ -507,12 +510,18 @@ mod client {
             }
             Ok(())
         }
+
+        /// Get sender to send events to self (for timers, async operations).
+        pub fn self_tx(&self) -> mpsc::Sender<P::Event> {
+            self.self_tx.clone()
+        }
     }
 
     impl<P: TypedProtocol> Clone for TypedClientContext<P> {
         fn clone(&self) -> Self {
             Self {
                 channels: self.channels.clone(),
+                self_tx: self.self_tx.clone(),
                 _phantom: PhantomData,
             }
         }
@@ -530,6 +539,7 @@ mod client {
         let channels_to_open = P::all_channels();
         let mut channel_senders: HashMap<P::Channel, mpsc::Sender<Vec<u8>>> = HashMap::new();
         let (event_tx, mut event_rx) = mpsc::channel::<TypedClientEvent<P>>(256);
+        let (self_tx, mut self_rx) = mpsc::channel::<P::Event>(64);
 
         let mut tasks = Vec::new();
         for &channel_type in channels_to_open {
@@ -539,6 +549,7 @@ mod client {
                     tracing::error!("Failed to open channel: {}", e);
                     let ctx = TypedClientContext {
                         channels: HashMap::new(),
+                        self_tx: self_tx.clone(),
                         _phantom: PhantomData,
                     };
                     actor_fn(ctx, TypedClientEvent::Disconnected).await;
@@ -559,16 +570,31 @@ mod client {
 
         let ctx = TypedClientContext {
             channels: channel_senders,
+            self_tx,
             _phantom: PhantomData,
         };
 
         actor_fn(ctx.clone(), TypedClientEvent::Connected).await;
 
-        while let Some(event) = event_rx.recv().await {
-            let is_disconnect = matches!(event, TypedClientEvent::Disconnected);
-            actor_fn(ctx.clone(), event).await;
-            if is_disconnect {
-                break;
+        loop {
+            tokio::select! {
+                event = event_rx.recv() => {
+                    match event {
+                        Some(e) => {
+                            let is_disconnect = matches!(e, TypedClientEvent::Disconnected);
+                            actor_fn(ctx.clone(), e).await;
+                            if is_disconnect {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                self_event = self_rx.recv() => {
+                    if let Some(event) = self_event {
+                        actor_fn(ctx.clone(), TypedClientEvent::Internal(event)).await;
+                    }
+                }
             }
         }
 
@@ -662,6 +688,8 @@ mod wasm_client {
         write_channels: Rc<RefCell<HashMap<u8, futures::channel::mpsc::UnboundedSender<Vec<u8>>>>>,
         /// Receive channel for events.
         event_rx: Rc<RefCell<futures::channel::mpsc::UnboundedReceiver<JsValue>>>,
+        /// Send channel for self-sent events.
+        event_tx: futures::channel::mpsc::UnboundedSender<JsValue>,
         /// Whether we're still connected.
         connected: Rc<RefCell<bool>>,
     }
@@ -706,6 +734,7 @@ mod wasm_client {
             Ok(JsTypedClientActor {
                 write_channels,
                 event_rx: Rc::new(RefCell::new(event_rx)),
+                event_tx,
                 connected,
             })
         }
@@ -754,6 +783,22 @@ mod wasm_client {
         #[wasm_bindgen(getter)]
         pub fn connected(&self) -> bool {
             *self.connected.borrow()
+        }
+
+        /// Send an event to self (for timers, async operations).
+        ///
+        /// The event will be delivered as `type: "internal"` with `data` containing the bytes.
+        #[wasm_bindgen(js_name = sendToSelf)]
+        pub fn send_to_self(&self, data: &[u8]) -> Result<(), JsError> {
+            let event = js_sys::Object::new();
+            js_sys::Reflect::set(&event, &"type".into(), &"internal".into()).unwrap();
+            let arr = js_sys::Uint8Array::from(data);
+            js_sys::Reflect::set(&event, &"data".into(), &arr).unwrap();
+
+            self.event_tx
+                .unbounded_send(event.into())
+                .map_err(|_| JsError::new("Event channel closed"))?;
+            Ok(())
         }
     }
 

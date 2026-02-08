@@ -389,6 +389,9 @@ async fn run_chat_actor(
                     TypedClientEvent::Disconnected => {
                         let _ = ui_tx.send(UiEvent::Disconnected).await;
                     }
+                    TypedClientEvent::Internal(_) => {
+                        // Chat client doesn't use self-sent events
+                    }
                 }
             }
         }

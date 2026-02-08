@@ -133,6 +133,189 @@ channel.write(&data).await?;
 let n = channel.read(&mut buf).await?;
 ```
 
+## Typed Actors & Channels
+
+The `helpers` crate provides `with_typed_actor` - a wrapper that handles:
+
+1. **Message framing** - Length-prefixed messages over raw byte streams
+2. **Channel typing** - Each channel identifies itself with a type byte on first message
+3. **User connection tracking** - Users are "connected" when all expected channels are established
+4. **Automatic serialization** - Encode/decode via your `TypedProtocol` implementation
+
+### Defining a Protocol
+
+```rust
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum MyChannel {
+    Chat,
+    GameState,
+}
+
+pub enum MyEvent {
+    Chat(ChatMessage),
+    GameState(GameUpdate),
+}
+
+pub struct MyProtocol;
+
+impl TypedProtocol for MyProtocol {
+    type Channel = MyChannel;
+    type Event = MyEvent;
+
+    fn channel_to_id(channel: &Self::Channel) -> u8 {
+        match channel {
+            MyChannel::Chat => 0,
+            MyChannel::GameState => 1,
+        }
+    }
+
+    fn channel_from_id(id: u8) -> Option<Self::Channel> {
+        match id {
+            0 => Some(MyChannel::Chat),
+            1 => Some(MyChannel::GameState),
+            _ => None,
+        }
+    }
+
+    fn all_channels() -> &'static [Self::Channel] {
+        &[MyChannel::Chat, MyChannel::GameState]
+    }
+
+    fn decode(channel: Self::Channel, data: &[u8]) -> Result<Self::Event, DecodeError> {
+        match channel {
+            MyChannel::Chat => Ok(MyEvent::Chat(bincode::deserialize(data)?)),
+            MyChannel::GameState => Ok(MyEvent::GameState(bincode::deserialize(data)?)),
+        }
+    }
+
+    fn encode(event: &Self::Event) -> Result<(Self::Channel, Vec<u8>), EncodeError> {
+        match event {
+            MyEvent::Chat(msg) => Ok((MyChannel::Chat, bincode::serialize(msg)?)),
+            MyEvent::GameState(upd) => Ok((MyChannel::GameState, bincode::serialize(upd)?)),
+        }
+    }
+}
+```
+
+### Server Actor
+
+The actor function receives typed events and a context for sending:
+
+```rust
+async fn my_actor(
+    ctx: TypedContext<MyUser, MyProtocol>,
+    event: TypedEvent<MyUser, MyProtocol>,
+    config: Arc<MyRoomConfig>,
+) {
+    match event {
+        TypedEvent::UserConnected(user) => {
+            println!("{} joined", user.username);
+        }
+        TypedEvent::UserDisconnected(user) => {
+            println!("{} left", user.username);
+        }
+        TypedEvent::Message { sender, channel, event } => {
+            // Handle typed message
+            ctx.broadcast(&event).await; // Send to all users
+        }
+        TypedEvent::Internal(event) => {
+            // Self-sent event (from ctx.self_tx)
+        }
+        TypedEvent::Shutdown => {
+            // Room closing, cleanup
+        }
+    }
+}
+```
+
+**Context methods:**
+- `ctx.broadcast(&event)` - Send to all connected users
+- `ctx.send_to_user(user_id, &event)` - Send to specific user
+- `ctx.self_tx.send(event)` - Send event to self (for timers, async operations)
+- `ctx.connected_users()` - Get list of connected user IDs
+
+### Client Actor
+
+Clients can also use the typed actor pattern:
+
+```rust
+with_typed_client_actor::<MyProtocol, _, _>(conn, |ctx, event| async move {
+    match event {
+        TypedClientEvent::Connected => { /* all channels established */ }
+        TypedClientEvent::Message(event) => { /* handle server message */ }
+        TypedClientEvent::Internal(event) => { /* handle self-sent event */ }
+        TypedClientEvent::Disconnected => { /* connection lost */ }
+    }
+}).await;
+```
+
+**Client context methods:**
+- `ctx.send(&event)` - Send event to server (routed by type)
+- `ctx.self_tx().send(event)` - Send event to self (for timers, async operations)
+
+### Connection Flow
+
+1. Client opens N channels (one per `all_channels()`)
+2. Each channel sends its type byte as first framed message
+3. Server tracks pending channels per user
+4. When all channels identified → `UserConnected` event
+5. If any channel closes → all user channels closed, `UserDisconnected` event
+
+## Quickplay
+
+Quickplay auto-joins an existing room or creates a new one:
+
+```
+POST /quickplay
+Authorization: Bearer <ticket>
+Content-Type: application/json
+
+{ "min_players": 2 }  // optional game-specific filter
+```
+
+**Server logic:**
+
+1. Find rooms matching the filter (`RoomConfig::matches_quickplay`)
+2. Exclude full rooms (`current_players >= max_players`)
+3. If match found → return room ID
+4. Otherwise, create new room using `RoomConfig::quickplay_default(request)`
+5. Return new room ID
+
+**Example config implementation:**
+
+```rust
+impl RoomConfig for MyRoomConfig {
+    fn name(&self) -> &str { &self.name }
+    fn max_players(&self) -> Option<usize> { Some(4) }
+
+    fn matches_quickplay(&self, request: &serde_json::Value) -> bool {
+        // Match by game mode
+        request.get("mode")
+            .and_then(|v| v.as_str())
+            .map(|m| m == self.mode)
+            .unwrap_or(true)
+    }
+
+    fn quickplay_default(request: &serde_json::Value) -> Option<Self> {
+        let mode = request.get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("casual");
+        Some(MyRoomConfig {
+            name: format!("Quick {} #{}", mode, rand::random::<u16>()),
+            mode: mode.to_string(),
+        })
+    }
+}
+```
+
+**Client usage:**
+
+```javascript
+const result = await api.quickplay(ticket, { mode: "ranked" });
+const roomId = result.room_id;
+// Now connect to room
+```
+
 ## Room Lifecycle
 
 - 5 min timeout for first connection
