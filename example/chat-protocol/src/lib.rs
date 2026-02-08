@@ -1,9 +1,58 @@
 //! Chat protocol shared between server and client.
 //!
-//! Defines channel types and message types for a simple chat application.
+//! Defines channel types, message types, and room config for a simple chat application.
 
 pub use multiplayer_kit_helpers::{DecodeError, EncodeError, TypedProtocol};
+use multiplayer_kit_protocol::RoomConfig;
 use serde::{Deserialize, Serialize};
+
+// ============================================================================
+// Room Config
+// ============================================================================
+
+/// Configuration for a chat room.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatRoomConfig {
+    /// Room name (displayed in lobby).
+    pub name: String,
+    /// Optional maximum players.
+    #[serde(default)]
+    pub max_players: Option<usize>,
+}
+
+impl RoomConfig for ChatRoomConfig {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("Room name cannot be empty".into());
+        }
+        if self.name.len() > 50 {
+            return Err("Room name too long (max 50 chars)".into());
+        }
+        Ok(())
+    }
+
+    fn max_players(&self) -> Option<usize> {
+        self.max_players
+    }
+
+    fn quickplay_default(_request: &serde_json::Value) -> Option<Self> {
+        Some(Self {
+            name: format!("Quick Chat {}", simple_rand()),
+            max_players: Some(20),
+        })
+    }
+}
+
+/// Simple random u16 without external deps.
+fn simple_rand() -> u16 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    RandomState::new().build_hasher().finish() as u16
+}
 
 // ============================================================================
 // Channel Types

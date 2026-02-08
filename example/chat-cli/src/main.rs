@@ -56,12 +56,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Got ticket!");
     println!();
     println!("Commands:");
-    println!("  /rooms     - List available rooms");
-    println!("  /create    - Create a new room");
-    println!("  /join <id> - Join a room");
-    println!("  /leave     - Leave current room");
-    println!("  /quit      - Exit");
-    println!("  <message>  - Send a chat message (when in a room)");
+    println!("  /rooms           - List available rooms");
+    println!("  /create <name>   - Create a new room");
+    println!("  /join <id>       - Join a room");
+    println!("  /quickplay       - Auto-join or create a room");
+    println!("  /leave           - Leave current room");
+    println!("  /quit            - Exit");
+    println!("  <message>        - Send a chat message (when in a room)");
     println!();
 
     // State
@@ -150,11 +151,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             match api.list_rooms().await {
                                 Ok(rooms) => {
                                     if rooms.is_empty() {
-                                        println!("No rooms available. Create one with /create");
+                                        println!("No rooms available. Create one with /create <name>");
                                     } else {
                                         println!("Available rooms:");
                                         for r in &rooms {
-                                            println!("  [{}] {} players", r.id.0, r.player_count);
+                                            println!("  [{}] '{}' - {} players", r.id.0, r.name, r.player_count);
                                         }
                                     }
                                 }
@@ -165,13 +166,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         "/create" => {
-                            println!("Creating room...");
-                            match api.create_room(&ticket).await {
+                            let name = match arg {
+                                Some(n) => n.to_string(),
+                                None => {
+                                    println!("Usage: /create <room_name>");
+                                    print!("> ");
+                                    io::stdout().flush()?;
+                                    continue;
+                                }
+                            };
+                            println!("Creating room '{}'...", name);
+                            let config = serde_json::json!({ "name": name });
+                            match api.create_room(&ticket, &config).await {
                                 Ok(create_resp) => {
-                                    println!("Created room {}. Join with: /join {}", create_resp.room_id, create_resp.room_id);
+                                    println!("Created room '{}' (id: {}). Join with: /join {}", name, create_resp.room_id, create_resp.room_id);
                                 }
                                 Err(e) => {
                                     println!("Failed to create room: {}", e);
+                                }
+                            }
+                        }
+
+                        "/quickplay" => {
+                            if in_room {
+                                println!("Already in a room. Use /leave first.");
+                            } else {
+                                println!("Finding or creating a room...");
+                                match api.quickplay::<()>(&ticket, None).await {
+                                    Ok(resp) => {
+                                        let action = if resp.created { "Created" } else { "Found" };
+                                        println!("{} room {}. Joining...", action, resp.room_id.0);
+                                        
+                                        match RoomConnection::connect(SERVER_QUIC, &ticket, resp.room_id).await {
+                                            Ok(conn) => {
+                                                let (tx, rx) = mpsc::channel::<String>(256);
+                                                send_tx = Some(tx);
+                                                in_room = true;
+
+                                                let ui = ui_tx.clone();
+                                                let user = username.clone();
+                                                tokio::spawn(async move {
+                                                    run_chat_actor(conn, user, ui, rx).await;
+                                                });
+
+                                                println!("Connected! Type messages or /leave to exit.");
+                                            }
+                                            Err(e) => {
+                                                println!("Failed to join room: {}", e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("Quickplay failed: {}", e);
+                                    }
                                 }
                             }
                         }

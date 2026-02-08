@@ -8,6 +8,86 @@ pub trait UserContext: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sy
     fn id(&self) -> Self::Id;
 }
 
+/// Trait for room configuration.
+/// Games implement this to define what config is needed when creating a room.
+pub trait RoomConfig: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static {
+    /// Room name (required, displayed in lobby).
+    fn name(&self) -> &str;
+
+    /// Validate config after deserialization. Called before room creation.
+    fn validate(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Minimum players for matchmaking/game start. Default: 1
+    fn min_players(&self) -> usize {
+        1
+    }
+
+    /// Maximum players allowed. Default: None (unlimited)
+    fn max_players(&self) -> Option<usize> {
+        None
+    }
+
+    /// Does this room match a quickplay request?
+    /// `request` is game-specific filter criteria from the client.
+    fn matches_quickplay(&self, _request: &serde_json::Value) -> bool {
+        true
+    }
+
+    /// Create config for a new quickplay room.
+    /// Returns None if quickplay is disabled (default).
+    /// `request` is game-specific filter criteria from the client.
+    fn quickplay_default(_request: &serde_json::Value) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
+}
+
+/// Simple config with just a name, for games that don't need custom config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimpleConfig {
+    pub name: String,
+}
+
+impl SimpleConfig {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    /// Generate an auto-room name with random suffix.
+    pub fn auto() -> Self {
+        Self {
+            name: format!("Auto-room {}", rand_u16()),
+        }
+    }
+}
+
+impl Default for SimpleConfig {
+    fn default() -> Self {
+        Self::auto()
+    }
+}
+
+impl RoomConfig for SimpleConfig {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn quickplay_default(_request: &serde_json::Value) -> Option<Self> {
+        Some(Self::auto())
+    }
+}
+
+/// Simple random u16 without external deps.
+fn rand_u16() -> u16 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    RandomState::new().build_hasher().finish() as u16
+}
+
 /// Unique identifier for a channel (bidirectional stream).
 /// Assigned by the server when a client opens a channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -91,23 +171,51 @@ pub struct RoomId(pub u64);
 
 /// Room metadata broadcast via lobby.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoomInfo {
+pub struct RoomInfo<C = serde_json::Value> {
     pub id: RoomId,
+    pub name: String,
     pub player_count: u32,
+    pub min_players: u32,
     pub max_players: Option<u32>,
+    pub is_joinable: bool,
     pub created_at: u64,
-    pub metadata: Option<serde_json::Value>,
+    /// Game-specific config. Use `()` or `serde_json::Value` if you don't need typed config.
+    pub config: C,
+}
+
+impl<C> RoomInfo<C> {
+    /// Convert to a different config type (for serialization).
+    pub fn map_config<D>(self, f: impl FnOnce(C) -> D) -> RoomInfo<D> {
+        RoomInfo {
+            id: self.id,
+            name: self.name,
+            player_count: self.player_count,
+            min_players: self.min_players,
+            max_players: self.max_players,
+            is_joinable: self.is_joinable,
+            created_at: self.created_at,
+            config: f(self.config),
+        }
+    }
+
+    /// Erase config type to JSON value.
+    pub fn into_json(self) -> RoomInfo<serde_json::Value>
+    where
+        C: Serialize,
+    {
+        self.map_config(|c| serde_json::to_value(c).unwrap_or(serde_json::Value::Null))
+    }
 }
 
 /// Lobby update events sent over QUIC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LobbyEvent {
+pub enum LobbyEvent<C = serde_json::Value> {
     /// Initial snapshot of all rooms.
-    Snapshot(Vec<RoomInfo>),
+    Snapshot(Vec<RoomInfo<C>>),
     /// A room was created.
-    RoomCreated(RoomInfo),
+    RoomCreated(RoomInfo<C>),
     /// A room was updated (player count changed, etc.).
-    RoomUpdated(RoomInfo),
+    RoomUpdated(RoomInfo<C>),
     /// A room was deleted.
     RoomDeleted(RoomId),
 }
@@ -119,4 +227,12 @@ pub struct TicketClaims<T> {
     pub exp: u64,
     /// User data provided by auth handler.
     pub user: T,
+}
+
+/// Response from quickplay endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuickplayResponse {
+    pub room_id: RoomId,
+    /// True if a new room was created, false if joined existing.
+    pub created: bool,
 }

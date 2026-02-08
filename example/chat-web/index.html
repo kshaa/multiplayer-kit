@@ -172,6 +172,7 @@
                 </select>
                 <button onclick="createRoom()">new room</button>
                 <button onclick="joinRoom()">join</button>
+                <button onclick="quickplay()">quick join</button>
                 <button onclick="leaveRoom()">leave</button>
                 <span id="status" class="status">disconnected</span>
             </div>
@@ -204,6 +205,7 @@
         window.authenticate = authenticate;
         window.createRoom = createRoom;
         window.joinRoom = joinRoom;
+        window.quickplay = quickplay;
         window.leaveRoom = leaveRoom;
         window.sendMessage = sendMessage;
 
@@ -265,7 +267,8 @@
                     const opt = document.createElement('option');
                     const id = typeof room.id === 'bigint' ? Number(room.id) : room.id;
                     opt.value = id;
-                    opt.textContent = `Room ${id} (${room.player_count} players)`;
+                    const name = room.name || `Room ${id}`;
+                    opt.textContent = `${name} (${room.player_count} players)`;
                     select.appendChild(opt);
                 }
             } catch (e) {
@@ -275,13 +278,52 @@
 
         async function createRoom() {
             if (!ticket) return;
+            const name = prompt('Enter room name:', 'My Chat Room');
+            if (!name) return;
+            
             try {
-                const resp = await api.createRoom(ticket);
+                const config = { name: name };
+                const resp = await api.createRoom(ticket, config);
                 const id = typeof resp.room_id === 'bigint' ? Number(resp.room_id) : resp.room_id;
-                log('created room ' + id, true);
+                log(`created room '${name}' (id: ${id})`, true);
                 await refreshRooms();
             } catch (e) {
                 log('failed to create room: ' + e.message, true);
+            }
+        }
+
+        async function quickplay() {
+            if (!ticket) return;
+            if (inRoom) {
+                log('already in a room, leave first', true);
+                return;
+            }
+
+            try {
+                log('finding a room...', true);
+                const resp = await api.quickplay(ticket, null);
+                const roomId = typeof resp.room_id === 'bigint' ? Number(resp.room_id) : resp.room_id;
+                const action = resp.created ? 'Created' : 'Found';
+                log(`${action} room ${roomId}, joining...`, true);
+
+                // Connect via JsRoomConnection (auto-detects WebTransport/WebSocket)
+                const conn = await JsRoomConnection.connectAuto(
+                    SERVER_WT,
+                    SERVER_WS,
+                    ticket,
+                    roomId,
+                    certHash
+                );
+
+                // Create typed actor with Chat channel
+                actor = await JsTypedClientActor.connect(conn, [CHAT_CHANNEL_ID]);
+                inRoom = true;
+                setStatus('connected (room ' + roomId + ')', true);
+
+                // Start actor event loop
+                runActorLoop();
+            } catch (e) {
+                log('quickplay failed: ' + e.message, true);
             }
         }
 

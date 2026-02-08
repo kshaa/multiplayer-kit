@@ -2,7 +2,7 @@
 
 use crate::error::{ConnectionError, ReceiveError};
 use crate::ClientError;
-use multiplayer_kit_protocol::{RoomId, RoomInfo};
+use multiplayer_kit_protocol::{QuickplayResponse, RoomId, RoomInfo};
 use serde::{Deserialize, Serialize};
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
@@ -134,13 +134,18 @@ mod native {
         }
 
         /// Create a new room. Requires a valid ticket in the Authorization header.
-        pub async fn create_room(&self, ticket: &str) -> Result<CreateRoomResponse, ClientError> {
+        /// `config` should be a serializable room config (e.g., `{"name": "My Room"}`).
+        pub async fn create_room<C: serde::Serialize>(
+            &self,
+            ticket: &str,
+            config: &C,
+        ) -> Result<CreateRoomResponse, ClientError> {
             let url = format!("{}/rooms", self.base_url);
             let resp = self
                 .http_client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", ticket))
-                .json(&serde_json::json!({}))
+                .json(config)
                 .send()
                 .await
                 .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
@@ -178,6 +183,43 @@ mod native {
             }
 
             Ok(())
+        }
+
+        /// Quickplay - find or create a room.
+        /// `filter` is optional game-specific criteria for finding a room.
+        pub async fn quickplay<F: serde::Serialize>(
+            &self,
+            ticket: &str,
+            filter: Option<&F>,
+        ) -> Result<QuickplayResponse, ClientError> {
+            let url = format!("{}/quickplay", self.base_url);
+            let mut req = self
+                .http_client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", ticket));
+
+            if let Some(f) = filter {
+                req = req.json(f);
+            } else {
+                req = req.json(&serde_json::json!({}));
+            }
+
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ClientError::Connection(ConnectionError::ServerRejected(
+                    format!("{}: {}", status, body),
+                )));
+            }
+
+            resp.json()
+                .await
+                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
         }
     }
 }
@@ -335,9 +377,15 @@ mod wasm {
             self.fetch("GET", "/rooms", None, None).await
         }
 
-        /// Create a new room.
-        pub async fn create_room(&self, ticket: &str) -> Result<CreateRoomResponse, ClientError> {
-            self.fetch("POST", "/rooms", Some("{}".to_string()), Some(ticket))
+        /// Create a new room with config.
+        pub async fn create_room<C: serde::Serialize>(
+            &self,
+            ticket: &str,
+            config: &C,
+        ) -> Result<CreateRoomResponse, ClientError> {
+            let body = serde_json::to_string(config)
+                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
+            self.fetch("POST", "/rooms", Some(body), Some(ticket))
                 .await
         }
 
@@ -378,6 +426,21 @@ mod wasm {
             }
 
             Ok(())
+        }
+
+        /// Quickplay - find or create a room.
+        pub async fn quickplay<F: serde::Serialize>(
+            &self,
+            ticket: &str,
+            filter: Option<&F>,
+        ) -> Result<QuickplayResponse, ClientError> {
+            let body = match filter {
+                Some(f) => serde_json::to_string(f)
+                    .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?,
+                None => "{}".to_string(),
+            };
+            self.fetch("POST", "/quickplay", Some(body), Some(ticket))
+                .await
         }
     }
 }
@@ -422,13 +485,27 @@ mod fallback {
             )))
         }
 
-        pub async fn create_room(&self, _ticket: &str) -> Result<CreateRoomResponse, ClientError> {
+        pub async fn create_room<C: serde::Serialize>(
+            &self,
+            _ticket: &str,
+            _config: &C,
+        ) -> Result<CreateRoomResponse, ClientError> {
             Err(ClientError::Connection(ConnectionError::Transport(
                 "No HTTP feature enabled".to_string(),
             )))
         }
 
         pub async fn delete_room(&self, _ticket: &str, _room_id: RoomId) -> Result<(), ClientError> {
+            Err(ClientError::Connection(ConnectionError::Transport(
+                "No HTTP feature enabled".to_string(),
+            )))
+        }
+
+        pub async fn quickplay<F: serde::Serialize>(
+            &self,
+            _ticket: &str,
+            _filter: Option<&F>,
+        ) -> Result<QuickplayResponse, ClientError> {
             Err(ClientError::Connection(ConnectionError::Transport(
                 "No HTTP feature enabled".to_string(),
             )))

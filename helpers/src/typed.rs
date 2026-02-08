@@ -188,9 +188,14 @@ mod server {
     }
 
     /// Wrap a typed actor function for the server.
-    pub fn with_typed_actor<T, P, F, Fut>(
+    /// 
+    /// The actor function receives:
+    /// - `TypedContext<T, P>` for sending messages
+    /// - `TypedEvent<T, P>` the current event
+    /// - `Arc<C>` the room config (shared, immutable)
+    pub fn with_typed_actor<T, P, C, F, Fut>(
         actor_fn: F,
-    ) -> impl Fn(multiplayer_kit_server::Room<T>) -> Pin<Box<dyn Future<Output = ()> + Send>>
+    ) -> impl Fn(multiplayer_kit_server::Room<T>, C) -> Pin<Box<dyn Future<Output = ()> + Send>>
            + Send
            + Sync
            + Clone
@@ -198,28 +203,32 @@ mod server {
     where
         T: UserContext,
         P: TypedProtocol,
-        F: Fn(TypedContext<T, P>, TypedEvent<T, P>) -> Fut + Send + Sync + Clone + 'static,
+        C: multiplayer_kit_protocol::RoomConfig + 'static,
+        F: Fn(TypedContext<T, P>, TypedEvent<T, P>, Arc<C>) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let actor_fn = Arc::new(actor_fn);
-        move |room: multiplayer_kit_server::Room<T>| {
+        move |room: multiplayer_kit_server::Room<T>, config: C| {
             let actor_fn = Arc::clone(&actor_fn);
             Box::pin(async move {
-                run_typed_server_actor::<T, P, F, Fut>(room, actor_fn).await;
+                run_typed_server_actor::<T, P, C, F, Fut>(room, config, actor_fn).await;
             })
         }
     }
 
     /// Internal: run the typed server actor loop.
-    async fn run_typed_server_actor<T, P, F, Fut>(
+    async fn run_typed_server_actor<T, P, C, F, Fut>(
         mut room: multiplayer_kit_server::Room<T>,
+        config: C,
         actor_fn: Arc<F>,
     ) where
         T: UserContext,
         P: TypedProtocol,
-        F: Fn(TypedContext<T, P>, TypedEvent<T, P>) -> Fut + Send + Sync + 'static,
+        C: multiplayer_kit_protocol::RoomConfig + 'static,
+        F: Fn(TypedContext<T, P>, TypedEvent<T, P>, Arc<C>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        let config = Arc::new(config);
         use multiplayer_kit_server::Accept;
 
         let (event_tx, mut event_rx) = mpsc::channel::<ServerInternalEvent<T, P>>(256);
@@ -262,7 +271,7 @@ mod server {
                             });
                         }
                         Some(Accept::Closing) => {
-                            actor_fn(ctx.clone(), TypedEvent::Shutdown).await;
+                            actor_fn(ctx.clone(), TypedEvent::Shutdown, Arc::clone(&config)).await;
                             break;
                         }
                         None => break,
@@ -271,10 +280,10 @@ mod server {
                 event = event_rx.recv() => {
                     match event {
                         Some(ServerInternalEvent::UserReady(user)) => {
-                            actor_fn(ctx.clone(), TypedEvent::UserConnected(user)).await;
+                            actor_fn(ctx.clone(), TypedEvent::UserConnected(user), Arc::clone(&config)).await;
                         }
                         Some(ServerInternalEvent::UserGone(user)) => {
-                            actor_fn(ctx.clone(), TypedEvent::UserDisconnected(user)).await;
+                            actor_fn(ctx.clone(), TypedEvent::UserDisconnected(user), Arc::clone(&config)).await;
                         }
                         Some(ServerInternalEvent::Message { sender, channel_id: _, channel_type, event }) => {
                             actor_fn(
@@ -284,6 +293,7 @@ mod server {
                                     channel: channel_type,
                                     event,
                                 },
+                                Arc::clone(&config),
                             )
                             .await;
                         }

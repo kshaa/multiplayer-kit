@@ -5,18 +5,19 @@
 
 use crate::lobby::Lobby;
 use dashmap::DashMap;
-use multiplayer_kit_protocol::{ChannelId, RoomId, RoomInfo, UserContext};
+use multiplayer_kit_protocol::{ChannelId, RoomConfig, RoomId, RoomInfo, UserContext};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 /// Type alias for the room handler factory function.
-pub type RoomHandlerFactory<T> = Arc<
-    dyn Fn(Room<T>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
+/// Now receives both the Room and the config.
+pub type RoomHandlerFactory<T, C> = Arc<
+    dyn Fn(Room<T>, C) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
 >;
 
 // ============================================================================
@@ -225,15 +226,17 @@ impl<T: UserContext> RoomShared<T> {
 // ============================================================================
 
 /// Manages all active rooms.
-pub struct RoomManager<T: UserContext> {
-    rooms: DashMap<RoomId, RoomEntry<T>>,
+pub struct RoomManager<T: UserContext, C: RoomConfig> {
+    rooms: DashMap<RoomId, RoomEntry<T, C>>,
     next_room_id: AtomicU64,
-    config: RoomConfig,
-    handler_factory: RoomHandlerFactory<T>,
+    settings: RoomSettings,
+    handler_factory: RoomHandlerFactory<T, C>,
 }
 
 /// Internal room entry with control handles.
-struct RoomEntry<T: UserContext> {
+struct RoomEntry<T: UserContext, C: RoomConfig> {
+    /// Room config (game-defined).
+    config: C,
     /// Send new channels to the room handler.
     channel_tx: mpsc::Sender<(T, ServerChannel)>,
     /// Signal shutdown.
@@ -242,33 +245,37 @@ struct RoomEntry<T: UserContext> {
     shared: Arc<RoomShared<T>>,
     /// Creator ID.
     creator_id: T::Id,
-    /// Creation time.
+    /// Creation time (Instant for duration calculations).
     created_at: Instant,
-    /// Metadata.
-    metadata: Option<serde_json::Value>,
+    /// Creation time (Unix timestamp for API).
+    created_at_unix: u64,
     /// Next channel ID.
     next_channel_id: AtomicU64,
 }
 
+/// Server-side room settings (timeouts, not game config).
 #[derive(Clone)]
-pub struct RoomConfig {
+pub struct RoomSettings {
     pub max_lifetime: Duration,
     pub first_connect_timeout: Duration,
     pub empty_timeout: Duration,
 }
 
-impl<T: UserContext> RoomManager<T> {
-    pub fn new(config: RoomConfig, handler_factory: RoomHandlerFactory<T>) -> Self {
+impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
+    pub fn new(settings: RoomSettings, handler_factory: RoomHandlerFactory<T, C>) -> Self {
         Self {
             rooms: DashMap::new(),
             next_room_id: AtomicU64::new(1),
-            config,
+            settings,
             handler_factory,
         }
     }
 
     /// Create a new room and spawn its handler.
-    pub fn create_room(&self, creator: &T, metadata: Option<serde_json::Value>) -> RoomId {
+    pub fn create_room(&self, creator: &T, config: C) -> Result<RoomId, String> {
+        // Validate config
+        config.validate()?;
+
         let id = RoomId(self.next_room_id.fetch_add(1, Ordering::SeqCst));
 
         // Create channels for room handler
@@ -290,23 +297,29 @@ impl<T: UserContext> RoomManager<T> {
             shared: Arc::clone(&shared),
         };
 
+        let created_at_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
         // Store entry
         let entry = RoomEntry {
+            config: config.clone(),
             channel_tx,
             shutdown_tx: Some(shutdown_tx),
             shared,
             creator_id: creator.id(),
             created_at: Instant::now(),
-            metadata,
+            created_at_unix,
             next_channel_id: AtomicU64::new(1),
         };
         self.rooms.insert(id, entry);
 
-        // Spawn handler
-        let handler_future = (self.handler_factory)(room);
+        // Spawn handler with config
+        let handler_future = (self.handler_factory)(room, config);
         tokio::spawn(handler_future);
 
-        id
+        Ok(id)
     }
 
     /// Delete a room (creator only).
@@ -344,6 +357,14 @@ impl<T: UserContext> RoomManager<T> {
         user: T,
     ) -> Option<(ChannelId, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, oneshot::Receiver<()>)> {
         let entry = self.rooms.get(&room_id)?;
+
+        // Check max players
+        if let Some(max) = entry.config.max_players() {
+            let current = entry.shared.user_count.load(Ordering::Relaxed) as usize;
+            if current >= max {
+                return None; // Room full
+            }
+        }
 
         let channel_id = ChannelId(entry.next_channel_id.fetch_add(1, Ordering::SeqCst));
         let user_id = user.id();
@@ -421,19 +442,28 @@ impl<T: UserContext> RoomManager<T> {
         }
     }
 
-    /// Get room info for lobby.
-    pub fn get_room_info(&self, room_id: RoomId) -> Option<RoomInfo> {
-        self.rooms.get(&room_id).map(|entry| RoomInfo {
-            id: room_id,
-            player_count: entry.shared.user_count.load(Ordering::Relaxed),
-            max_players: None,
-            created_at: entry.created_at.elapsed().as_secs(),
-            metadata: entry.metadata.clone(),
+    /// Get room info for lobby (with config as JSON).
+    pub fn get_room_info(&self, room_id: RoomId) -> Option<RoomInfo<serde_json::Value>> {
+        self.rooms.get(&room_id).map(|entry| {
+            let player_count = entry.shared.user_count.load(Ordering::Relaxed);
+            let max_players = entry.config.max_players().map(|m| m as u32);
+            let is_joinable = max_players.map(|m| player_count < m).unwrap_or(true);
+
+            RoomInfo {
+                id: room_id,
+                name: entry.config.name().to_string(),
+                player_count,
+                min_players: entry.config.min_players() as u32,
+                max_players,
+                is_joinable,
+                created_at: entry.created_at_unix,
+                config: serde_json::to_value(&entry.config).unwrap_or(serde_json::Value::Null),
+            }
         })
     }
 
     /// Get all rooms for lobby snapshot.
-    pub fn get_all_rooms(&self) -> Vec<RoomInfo> {
+    pub fn get_all_rooms(&self) -> Vec<RoomInfo<serde_json::Value>> {
         self.rooms
             .iter()
             .filter_map(|entry| self.get_room_info(*entry.key()))
@@ -443,6 +473,26 @@ impl<T: UserContext> RoomManager<T> {
     /// Check if a room exists.
     pub fn room_exists(&self, room_id: RoomId) -> bool {
         self.rooms.contains_key(&room_id)
+    }
+
+    /// Find a room for quickplay.
+    pub fn find_quickplay_room(&self, request: &serde_json::Value) -> Option<RoomId> {
+        for entry in self.rooms.iter() {
+            let player_count = entry.shared.user_count.load(Ordering::Relaxed) as usize;
+            let max_players = entry.config.max_players();
+
+            // Check if joinable
+            let is_joinable = max_players.map(|m| player_count < m).unwrap_or(true);
+            if !is_joinable {
+                continue;
+            }
+
+            // Check if matches quickplay criteria
+            if entry.config.matches_quickplay(request) {
+                return Some(*entry.key());
+            }
+        }
+        None
     }
 
     /// Run lifecycle checks (call periodically).
@@ -456,17 +506,17 @@ impl<T: UserContext> RoomManager<T> {
             let last_activity = *entry.shared.last_activity.read().await;
             let idle_time = now.duration_since(last_activity);
 
-            if age > self.config.max_lifetime {
+            if age > self.settings.max_lifetime {
                 to_remove.push(*entry.key());
                 continue;
             }
 
-            if user_count == 0 && age > self.config.first_connect_timeout {
+            if user_count == 0 && age > self.settings.first_connect_timeout {
                 to_remove.push(*entry.key());
                 continue;
             }
 
-            if user_count == 0 && idle_time > self.config.empty_timeout {
+            if user_count == 0 && idle_time > self.settings.empty_timeout {
                 to_remove.push(*entry.key());
             }
         }

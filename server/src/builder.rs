@@ -1,20 +1,20 @@
 use crate::room::{Room, RoomHandlerFactory};
 use crate::{AuthFuture, AuthRequest, Server, ServerConfig};
-use multiplayer_kit_protocol::{RejectReason, UserContext};
+use multiplayer_kit_protocol::{RejectReason, RoomConfig, SimpleConfig, UserContext};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Builder for constructing a Server instance.
-pub struct ServerBuilder<T: UserContext + Unpin> {
+pub struct ServerBuilder<T: UserContext + Unpin, C: RoomConfig = SimpleConfig> {
     config: ServerConfig,
     auth_handler: Option<Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>>,
-    handler_factory: Option<RoomHandlerFactory<T>>,
+    handler_factory: Option<RoomHandlerFactory<T, C>>,
     jwt_secret: Option<Vec<u8>>,
-    _phantom: PhantomData<T>,
+    _phantom: PhantomData<(T, C)>,
 }
 
-impl<T: UserContext + Unpin> ServerBuilder<T> {
+impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
     pub fn new() -> Self {
         Self {
             config: ServerConfig::default(),
@@ -61,13 +61,14 @@ impl<T: UserContext + Unpin> ServerBuilder<T> {
 
     /// Set the room handler factory.
     /// 
-    /// The factory is called for each new room and should return a future
-    /// that runs for the room's lifetime. Accept channels with `room.accept()`,
+    /// The factory is called for each new room and receives both the Room
+    /// and the room config. Accept channels with `room.accept()`,
     /// read/write to channels, and broadcast with `room.broadcast()`.
     /// 
     /// # Example
     /// ```ignore
-    /// .room_handler(|mut room| async move {
+    /// .room_handler(|mut room, config: MyRoomConfig| async move {
+    ///     println!("Room '{}' started", config.name());
     ///     while let Some(accept) = room.accept().await {
     ///         match accept {
     ///             Accept::NewChannel(user, mut channel) => {
@@ -88,15 +89,15 @@ impl<T: UserContext + Unpin> ServerBuilder<T> {
     /// ```
     pub fn room_handler<F, Fut>(mut self, factory: F) -> Self
     where
-        F: Fn(Room<T>) -> Fut + Send + Sync + 'static,
+        F: Fn(Room<T>, C) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        self.handler_factory = Some(Arc::new(move |room| Box::pin(factory(room))));
+        self.handler_factory = Some(Arc::new(move |room, config| Box::pin(factory(room, config))));
         self
     }
 
     /// Build the server.
-    pub fn build(self) -> Result<Server<T>, &'static str> {
+    pub fn build(self) -> Result<Server<T, C>, &'static str> {
         let auth_handler = self.auth_handler.ok_or("auth_handler is required")?;
         let handler_factory = self.handler_factory.ok_or("room_handler is required")?;
         let jwt_secret = self.jwt_secret.ok_or("jwt_secret is required")?;
@@ -111,7 +112,7 @@ impl<T: UserContext + Unpin> ServerBuilder<T> {
     }
 }
 
-impl<T: UserContext + Unpin> Default for ServerBuilder<T> {
+impl<T: UserContext + Unpin, C: RoomConfig> Default for ServerBuilder<T, C> {
     fn default() -> Self {
         Self::new()
     }

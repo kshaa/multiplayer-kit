@@ -8,23 +8,23 @@
 use crate::lobby::Lobby;
 use crate::room::RoomManager;
 use crate::ticket::TicketManager;
-use multiplayer_kit_protocol::{ChannelId, LobbyEvent, RoomId, UserContext};
+use multiplayer_kit_protocol::{ChannelId, LobbyEvent, RoomConfig, RoomId, UserContext};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use wtransport::endpoint::IncomingSession;
 use wtransport::Connection;
 
 /// Shared state for QUIC handlers.
-pub struct QuicState<T: UserContext> {
-    pub room_manager: Arc<RoomManager<T>>,
+pub struct QuicState<T: UserContext, C: RoomConfig> {
+    pub room_manager: Arc<RoomManager<T, C>>,
     pub ticket_manager: Arc<TicketManager>,
     pub lobby: Arc<Lobby>,
 }
 
 /// Handle an incoming WebTransport session.
-pub async fn handle_session<T: UserContext>(
+pub async fn handle_session<T: UserContext, C: RoomConfig>(
     incoming: IncomingSession,
-    state: Arc<QuicState<T>>,
+    state: Arc<QuicState<T, C>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let session_request = incoming.await?;
     let path = session_request.path().to_string();
@@ -46,9 +46,9 @@ pub async fn handle_session<T: UserContext>(
 }
 
 /// Handle a lobby WebTransport connection.
-async fn handle_lobby_connection<T: UserContext>(
+async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
     connection: Connection,
-    state: Arc<QuicState<T>>,
+    state: Arc<QuicState<T, C>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Open a unidirectional stream to send lobby events
     let mut send_stream = connection.open_uni().await?.await?;
@@ -104,10 +104,10 @@ async fn handle_lobby_connection<T: UserContext>(
 /// 3. Client opens additional bi-streams as "channels" - each is bidirectional
 /// 4. Client sends on bi-stream -> server reads -> forwards to room handler
 /// 5. Room handler sends response -> routed back on SAME bi-stream
-async fn handle_room_connection<T: UserContext>(
+async fn handle_room_connection<T: UserContext, C: RoomConfig>(
     connection: Connection,
     room_id: RoomId,
-    state: Arc<QuicState<T>>,
+    state: Arc<QuicState<T, C>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Check room exists
     if !state.room_manager.room_exists(room_id) {

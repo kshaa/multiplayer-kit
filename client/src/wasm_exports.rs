@@ -73,12 +73,16 @@ impl JsApiClient {
         serde_wasm_bindgen::to_value(&rooms).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Create a new room. Returns { room_id: number }.
+    /// Create a new room with config. Returns { room_id: number }.
+    /// `config` should be a JS object like `{ name: "My Room" }`.
     #[wasm_bindgen(js_name = createRoom)]
-    pub async fn create_room(&self, ticket: &str) -> Result<JsValue, JsError> {
+    pub async fn create_room(&self, ticket: &str, config: JsValue) -> Result<JsValue, JsError> {
+        let config: serde_json::Value = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsError::new(&format!("Invalid config: {}", e)))?;
+
         let resp = self
             .inner
-            .create_room(ticket)
+            .create_room(ticket, &config)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
 
@@ -92,6 +96,33 @@ impl JsApiClient {
             .delete_room(ticket, RoomId(room_id as u64))
             .await
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Quickplay - find or create a room.
+    /// Returns { room_id: number, created: boolean }.
+    /// `filter` is optional game-specific criteria (JS object or null).
+    #[wasm_bindgen]
+    pub async fn quickplay(
+        &self,
+        ticket: &str,
+        filter: JsValue,
+    ) -> Result<JsValue, JsError> {
+        let filter_opt: Option<serde_json::Value> = if filter.is_null() || filter.is_undefined() {
+            None
+        } else {
+            Some(
+                serde_wasm_bindgen::from_value(filter)
+                    .map_err(|e| JsError::new(&format!("Invalid filter: {}", e)))?,
+            )
+        };
+
+        let resp = self
+            .inner
+            .quickplay(ticket, filter_opt.as_ref())
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        serde_wasm_bindgen::to_value(&resp).map_err(|e| JsError::new(&e.to_string()))
     }
 }
 

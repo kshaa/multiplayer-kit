@@ -9,7 +9,7 @@ use crate::ticket::TicketManager;
 use actix::{Actor, ActorContext, AsyncContext, Handler, Message, StreamHandler};
 use actix_web::{web, HttpRequest, HttpResponse};
 use actix_web_actors::ws;
-use multiplayer_kit_protocol::{ChannelId, RoomId, UserContext};
+use multiplayer_kit_protocol::{ChannelId, RoomConfig, RoomId, UserContext};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
@@ -18,16 +18,16 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shared state for WebSocket handlers.
-pub struct WsState<T: UserContext> {
-    pub room_manager: Arc<RoomManager<T>>,
+pub struct WsState<T: UserContext, C: RoomConfig> {
+    pub room_manager: Arc<RoomManager<T, C>>,
     pub ticket_manager: Arc<TicketManager>,
     pub lobby: Arc<Lobby>,
 }
 
 /// WebSocket actor for a room channel.
-pub struct RoomWsActor<T: UserContext + 'static> {
+pub struct RoomWsActor<T: UserContext + 'static, C: RoomConfig + 'static> {
     room_id: RoomId,
-    room_manager: Arc<RoomManager<T>>,
+    room_manager: Arc<RoomManager<T, C>>,
     lobby: Arc<Lobby>,
     /// Channel ID (set after channel opens).
     channel_id: Option<ChannelId>,
@@ -50,10 +50,10 @@ pub struct RoomMessage(pub Vec<u8>);
 #[rtype(result = "()")]
 pub struct ChannelClosed;
 
-impl<T: UserContext + Unpin + 'static> RoomWsActor<T> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> RoomWsActor<T, C> {
     pub fn new(
         room_id: RoomId,
-        room_manager: Arc<RoomManager<T>>,
+        room_manager: Arc<RoomManager<T, C>>,
         lobby: Arc<Lobby>,
         channel_id: ChannelId,
         read_tx: mpsc::Sender<Vec<u8>>,
@@ -107,7 +107,7 @@ impl<T: UserContext + Unpin + 'static> RoomWsActor<T> {
     }
 }
 
-impl<T: UserContext + Unpin + 'static> Actor for RoomWsActor<T> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Actor for RoomWsActor<T, C> {
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
@@ -134,7 +134,7 @@ impl<T: UserContext + Unpin + 'static> Actor for RoomWsActor<T> {
     }
 }
 
-impl<T: UserContext + Unpin + 'static> Handler<RoomMessage> for RoomWsActor<T> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<RoomMessage> for RoomWsActor<T, C> {
     type Result = ();
 
     fn handle(&mut self, msg: RoomMessage, ctx: &mut Self::Context) {
@@ -142,7 +142,7 @@ impl<T: UserContext + Unpin + 'static> Handler<RoomMessage> for RoomWsActor<T> {
     }
 }
 
-impl<T: UserContext + Unpin + 'static> Handler<ChannelClosed> for RoomWsActor<T> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<ChannelClosed> for RoomWsActor<T, C> {
     type Result = ();
 
     fn handle(&mut self, _msg: ChannelClosed, ctx: &mut Self::Context) {
@@ -150,8 +150,8 @@ impl<T: UserContext + Unpin + 'static> Handler<ChannelClosed> for RoomWsActor<T>
     }
 }
 
-impl<T: UserContext + Unpin + 'static> StreamHandler<Result<ws::Message, ws::ProtocolError>>
-    for RoomWsActor<T>
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> StreamHandler<Result<ws::Message, ws::ProtocolError>>
+    for RoomWsActor<T, C>
 {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         match msg {
@@ -192,12 +192,12 @@ impl<T: UserContext + Unpin + 'static> StreamHandler<Result<ws::Message, ws::Pro
 }
 
 /// HTTP handler to upgrade to WebSocket for room channels.
-pub async fn room_ws<T: UserContext + Unpin + 'static>(
+pub async fn room_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
     req: HttpRequest,
     stream: web::Payload,
     path: web::Path<(u64,)>,
     query: web::Query<WsQuery>,
-    state: web::Data<WsState<T>>,
+    state: web::Data<WsState<T, C>>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let room_id = RoomId(path.0);
     let ticket = &query.ticket;

@@ -10,12 +10,12 @@ pub mod ws;
 use crate::lobby::Lobby;
 use crate::quic::QuicState;
 use crate::rest::AppState;
-use crate::room::{RoomConfig, RoomHandlerFactory, RoomManager};
+use crate::room::{RoomHandlerFactory, RoomManager, RoomSettings};
 use crate::ticket::TicketManager;
 use crate::ws::WsState;
 use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
-use multiplayer_kit_protocol::{RejectReason, UserContext};
+use multiplayer_kit_protocol::{RejectReason, RoomConfig, UserContext};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -27,19 +27,19 @@ use wtransport::ServerConfig as WtServerConfig;
 
 pub use builder::ServerBuilder;
 pub use error::ServerError;
-pub use multiplayer_kit_protocol::{ChannelId, RoomId};
+pub use multiplayer_kit_protocol::{ChannelId, RoomId, SimpleConfig};
 pub use room::{Accept, ChannelError, Room, RoomHandle, ServerChannel};
 
 /// Type alias for auth handler boxed future.
 pub type AuthFuture<T> = Pin<Box<dyn Future<Output = Result<T, RejectReason>> + Send>>;
 
-/// The main server struct, generic over user context type.
-pub struct Server<T: UserContext + Unpin> {
+/// The main server struct, generic over user context and room config.
+pub struct Server<T: UserContext + Unpin, C: RoomConfig = SimpleConfig> {
     config: ServerConfig,
     auth_handler: Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>,
-    handler_factory: RoomHandlerFactory<T>,
+    handler_factory: RoomHandlerFactory<T, C>,
     jwt_secret: Vec<u8>,
-    _phantom: PhantomData<T>,
+    _phantom: PhantomData<(T, C)>,
 }
 
 /// Configuration for the server.
@@ -78,9 +78,9 @@ pub struct AuthRequest {
     pub body: Option<Vec<u8>>,
 }
 
-impl<T: UserContext + Unpin + 'static> Server<T> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
     /// Create a new server builder.
-    pub fn builder() -> ServerBuilder<T> {
+    pub fn builder() -> ServerBuilder<T, C> {
         ServerBuilder::new()
     }
 
@@ -93,13 +93,13 @@ impl<T: UserContext + Unpin + 'static> Server<T> {
         );
 
         // Create shared state
-        let room_config = RoomConfig {
+        let room_settings = RoomSettings {
             max_lifetime: Duration::from_secs(self.config.room_max_lifetime_secs),
             first_connect_timeout: Duration::from_secs(self.config.room_first_connect_timeout_secs),
             empty_timeout: Duration::from_secs(self.config.room_empty_timeout_secs),
         };
 
-        let room_manager = Arc::new(RoomManager::<T>::new(room_config, self.handler_factory));
+        let room_manager = Arc::new(RoomManager::<T, C>::new(room_settings, self.handler_factory));
         let ticket_manager = Arc::new(TicketManager::new(&self.jwt_secret));
         let lobby = Arc::new(Lobby::new());
 
@@ -168,13 +168,14 @@ impl<T: UserContext + Unpin + 'static> Server<T> {
                 .wrap(cors)
                 .app_data(app_state.clone())
                 .app_data(ws_state.clone())
-                .route("/ticket", web::post().to(rest::issue_ticket::<T>))
-                .route("/rooms", web::post().to(rest::create_room::<T>))
-                .route("/rooms", web::get().to(rest::list_rooms::<T>))
-                .route("/rooms/{id}", web::delete().to(rest::delete_room::<T>))
-                .route("/cert-hash", web::get().to(rest::get_cert_hash::<T>))
+                .route("/ticket", web::post().to(rest::issue_ticket::<T, C>))
+                .route("/rooms", web::post().to(rest::create_room::<T, C>))
+                .route("/rooms", web::get().to(rest::list_rooms::<T, C>))
+                .route("/rooms/{id}", web::delete().to(rest::delete_room::<T, C>))
+                .route("/quickplay", web::post().to(rest::quickplay::<T, C>))
+                .route("/cert-hash", web::get().to(rest::get_cert_hash::<T, C>))
                 // WebSocket endpoint for rooms
-                .route("/ws/room/{id}", web::get().to(ws::room_ws::<T>))
+                .route("/ws/room/{id}", web::get().to(ws::room_ws::<T, C>))
         })
         .bind(&http_addr)?
         .run();

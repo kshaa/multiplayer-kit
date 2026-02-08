@@ -439,6 +439,7 @@ dependencies = [
  "multiplayer-kit-client",
  "multiplayer-kit-protocol",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -466,6 +467,7 @@ dependencies = [
  "multiplayer-kit-helpers",
  "multiplayer-kit-protocol",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

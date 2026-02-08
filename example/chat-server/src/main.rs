@@ -2,12 +2,13 @@
 //!
 //! Run with: cargo run --bin chat-server
 
-use chat_protocol::{ChatChannel, ChatEvent, ChatMessage, ChatProtocol, ChatUser};
+use chat_protocol::{ChatChannel, ChatEvent, ChatMessage, ChatProtocol, ChatRoomConfig, ChatUser};
 use multiplayer_kit_helpers::{with_typed_actor, TypedContext, TypedEvent};
 use multiplayer_kit_protocol::RejectReason;
 use multiplayer_kit_server::{AuthRequest, Server};
 use serde::Deserialize;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 static NEXT_USER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -22,13 +23,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("Endpoints:");
     println!("  POST /ticket         - Get auth ticket (body: {{\"username\": \"name\"}})");
-    println!("  POST /rooms          - Create room");
+    println!("  POST /rooms          - Create room (body: {{\"name\": \"Room Name\"}})");
     println!("  GET  /rooms          - List rooms");
     println!("  DELETE /rooms/{{id}}   - Delete room");
+    println!("  POST /quickplay      - Quick join or create room");
     println!("  GET  /cert-hash      - Get cert hash for WebTransport");
     println!();
 
-    let server = Server::<ChatUser>::builder()
+    let server = Server::<ChatUser, ChatRoomConfig>::builder()
         .http_addr("127.0.0.1:8080")
         .quic_addr("127.0.0.1:4433")
         .jwt_secret(b"super-secret-key-for-dev-only")
@@ -60,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(user)
         })
         // Typed actor - handles events with automatic framing and serialization
-        .room_handler(with_typed_actor::<ChatUser, ChatProtocol, _, _>(chat_actor))
+        .room_handler(with_typed_actor::<ChatUser, ChatProtocol, ChatRoomConfig, _, _>(chat_actor))
         .build()
         .expect("Failed to build server");
 
@@ -73,23 +75,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn chat_actor(
     ctx: TypedContext<ChatUser, ChatProtocol>,
     event: TypedEvent<ChatUser, ChatProtocol>,
+    config: Arc<ChatRoomConfig>,
 ) {
     let room_id = ctx.room_id();
 
     match event {
         TypedEvent::UserConnected(user) => {
-            tracing::info!("[Room {:?}] {} connected", room_id, user.username);
+            tracing::info!("[Room {:?} '{}'] {} connected", room_id, config.name, user.username);
 
             // Broadcast join message
             let msg = ChatEvent::Chat(ChatMessage::System(format!(
-                "*** {} joined the chat ***",
-                user.username
+                "*** {} joined '{}' ***",
+                user.username, config.name
             )));
             ctx.broadcast(&msg).await;
         }
 
         TypedEvent::UserDisconnected(user) => {
-            tracing::info!("[Room {:?}] {} disconnected", room_id, user.username);
+            tracing::info!("[Room {:?} '{}'] {} disconnected", room_id, config.name, user.username);
 
             // Broadcast leave message
             let msg = ChatEvent::Chat(ChatMessage::System(format!(
@@ -119,7 +122,7 @@ async fn chat_actor(
         }
 
         TypedEvent::Shutdown => {
-            tracing::info!("[Room {:?}] Shutting down", room_id);
+            tracing::info!("[Room {:?} '{}'] Shutting down", room_id, config.name);
         }
     }
 }
