@@ -6,4 +6,8 @@ members = [
     "server",
     "client",
     "helpers",
+    "example/chat-server",
+    "example/chat-cli",
+    "example/chat-client",
+    "example/chat-protocol",
 ]
