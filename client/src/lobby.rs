@@ -42,7 +42,8 @@ mod native {
             let endpoint = wtransport::Endpoint::client(config)
                 .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
 
-            let lobby_url = format!("{}/lobby", url);
+            // Auth via query param (same as rooms)
+            let lobby_url = format!("{}/lobby?ticket={}", url, ticket);
             let connection = endpoint.connect(&lobby_url).await.map_err(|e| {
                 let err_str = e.to_string();
                 if err_str.contains("DNS") || err_str.contains("resolve") {
@@ -56,20 +57,7 @@ mod native {
                 }
             })?;
 
-            let (mut send_stream, _recv) = connection
-                .open_bi()
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-
-            send_stream
-                .write_all(ticket.as_bytes())
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-
-            drop(send_stream);
-
+            // Server sends events on unidirectional stream
             let recv_stream = connection.accept_uni().await.map_err(|e| {
                 let err_str = e.to_string();
                 if err_str.contains("rejected") || err_str.contains("invalid") {
@@ -120,7 +108,8 @@ mod native {
                 return Err(ClientError::Receive(ReceiveError::Stream(e.to_string())));
             }
 
-            bincode::deserialize(&buf)
+            // Lobby uses JSON (RoomInfo.config is serde_json::Value)
+            serde_json::from_slice(&buf)
                 .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
         }
 
@@ -150,9 +139,19 @@ mod wasm {
     use wasm_bindgen_futures::JsFuture;
     use web_wt_sys as wt;
 
+    enum LobbyTransport {
+        WebTransport {
+            _transport: wt::WebTransport,
+            reader: web_sys::ReadableStreamDefaultReader,
+        },
+        WebSocket {
+            ws: web_sys::WebSocket,
+            messages: Rc<RefCell<Vec<Vec<u8>>>>,
+        },
+    }
+
     pub struct LobbyClient {
-        _transport: wt::WebTransport,
-        reader: web_sys::ReadableStreamDefaultReader,
+        transport: LobbyTransport,
         buffer: Vec<u8>,
         state: Rc<RefCell<ConnectionState>>,
     }
@@ -162,12 +161,47 @@ mod wasm {
             Self::connect_with_options(url, ticket, None).await
         }
 
+        /// Auto-detect: try WebTransport first, fall back to WebSocket
+        pub async fn connect_auto(
+            wt_url: &str,
+            ws_url: &str,
+            ticket: &str,
+            cert_hash_base64: Option<&str>,
+        ) -> Result<Self, ClientError> {
+            // Check if WebTransport is available
+            let has_wt = js_sys::Reflect::get(&js_sys::global(), &"WebTransport".into())
+                .map(|v| !v.is_undefined())
+                .unwrap_or(false);
+
+            if has_wt {
+                match Self::connect_webtransport(wt_url, ticket, cert_hash_base64).await {
+                    Ok(client) => return Ok(client),
+                    Err(e) => {
+                        web_sys::console::warn_1(
+                            &format!("WebTransport lobby failed, falling back to WebSocket: {:?}", e).into(),
+                        );
+                    }
+                }
+            }
+
+            // Fall back to WebSocket
+            Self::connect_websocket(ws_url, ticket).await
+        }
+
         pub async fn connect_with_options(
             url: &str,
             ticket: &str,
             cert_hash_base64: Option<&str>,
         ) -> Result<Self, ClientError> {
-            let lobby_url = format!("{}/lobby", url);
+            Self::connect_webtransport(url, ticket, cert_hash_base64).await
+        }
+
+        async fn connect_webtransport(
+            url: &str,
+            ticket: &str,
+            cert_hash_base64: Option<&str>,
+        ) -> Result<Self, ClientError> {
+            let lobby_url = format!("{}/lobby?ticket={}", url, ticket);
 
             let transport = if let Some(hash_b64) = cert_hash_base64 {
                 let hash_bytes = base64_decode(hash_b64).map_err(|e| {
@@ -197,26 +231,7 @@ mod wasm {
                 ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
             })?;
 
-            let bi_stream = transport.create_bidirectional_stream().await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-            })?;
-
-            let writable: web_sys::WritableStream = bi_stream.writable().unchecked_into();
-            let writer = writable.get_writer().map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-            })?;
-
-            let ticket_bytes = js_sys::Uint8Array::from(ticket.as_bytes());
-            JsFuture::from(writer.write_with_chunk(&ticket_bytes))
-                .await
-                .map_err(|e| {
-                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-                })?;
-
-            JsFuture::from(writer.close()).await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-            })?;
-
+            // Server sends events on unidirectional stream
             let incoming_uni: web_sys::ReadableStream =
                 transport.incoming_unidirectional_streams().unchecked_into();
             let uni_reader = incoming_uni
@@ -249,10 +264,93 @@ mod wasm {
                 .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
 
             Ok(Self {
-                _transport: transport,
-                reader,
+                transport: LobbyTransport::WebTransport {
+                    _transport: transport,
+                    reader,
+                },
                 buffer: Vec::new(),
                 state: Rc::new(RefCell::new(ConnectionState::Connected)),
+            })
+        }
+
+        async fn connect_websocket(url: &str, ticket: &str) -> Result<Self, ClientError> {
+            let ws_url = format!("{}/ws/lobby?ticket={}", url, ticket);
+
+            let ws = web_sys::WebSocket::new(&ws_url).map_err(|e| {
+                ClientError::Connection(ConnectionError::InvalidUrl(format!("{:?}", e)))
+            })?;
+
+            ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
+
+            let messages: Rc<RefCell<Vec<Vec<u8>>>> = Rc::new(RefCell::new(Vec::new()));
+            let state: Rc<RefCell<ConnectionState>> =
+                Rc::new(RefCell::new(ConnectionState::Connecting));
+
+            // Set up message handler
+            let messages_clone = messages.clone();
+            let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
+                move |event: web_sys::MessageEvent| {
+                    if let Ok(buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() {
+                        let array = js_sys::Uint8Array::new(&buffer);
+                        messages_clone.borrow_mut().push(array.to_vec());
+                    }
+                },
+            );
+            ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+            on_message.forget();
+
+            // Set up close handler
+            let state_clone = state.clone();
+            let on_close =
+                Closure::<dyn FnMut(web_sys::CloseEvent)>::new(move |_: web_sys::CloseEvent| {
+                    *state_clone.borrow_mut() =
+                        ConnectionState::Lost(DisconnectReason::ServerClosed);
+                });
+            ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+            on_close.forget();
+
+            // Set up error handler
+            let state_clone = state.clone();
+            let on_error = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(
+                move |_: web_sys::ErrorEvent| {
+                    *state_clone.borrow_mut() =
+                        ConnectionState::Lost(DisconnectReason::NetworkError(
+                            "WebSocket error".to_string(),
+                        ));
+                },
+            );
+            ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+            on_error.forget();
+
+            // Wait for connection
+            let ws_clone = ws.clone();
+            let state_clone = state.clone();
+            let open_promise = js_sys::Promise::new(&mut |resolve, reject| {
+                let on_open = Closure::<dyn FnMut()>::new(move || {
+                    resolve.call0(&JsValue::NULL).unwrap();
+                });
+                ws_clone.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+                on_open.forget();
+
+                let on_error = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(
+                    move |e: web_sys::ErrorEvent| {
+                        reject.call1(&JsValue::NULL, &e).unwrap();
+                    },
+                );
+                ws_clone.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+                on_error.forget();
+            });
+
+            JsFuture::from(open_promise).await.map_err(|e| {
+                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
+            })?;
+
+            *state_clone.borrow_mut() = ConnectionState::Connected;
+
+            Ok(Self {
+                transport: LobbyTransport::WebSocket { ws, messages },
+                buffer: Vec::new(),
+                state,
             })
         }
 
@@ -265,41 +363,94 @@ mod wasm {
                 return Err(ClientError::Receive(ReceiveError::NotConnected));
             }
 
-            while self.buffer.len() < 4 {
-                let chunk = self.read_chunk().await?;
-                if chunk.is_empty() {
-                    *self.state.borrow_mut() =
-                        ConnectionState::Lost(DisconnectReason::ServerClosed);
-                    return Err(ClientError::Disconnected(DisconnectReason::ServerClosed));
+            // Check transport type and get data accordingly
+            let is_websocket = matches!(self.transport, LobbyTransport::WebSocket { .. });
+
+            if is_websocket {
+                // WebSocket: messages are already framed
+                let messages = match &self.transport {
+                    LobbyTransport::WebSocket { messages, .. } => messages.clone(),
+                    _ => unreachable!(),
+                };
+
+                loop {
+                    // Check for pending messages
+                    {
+                        let mut msgs = messages.borrow_mut();
+                        if !msgs.is_empty() {
+                            let data = msgs.remove(0);
+                            // Lobby uses JSON (RoomInfo.config is serde_json::Value)
+                            return serde_json::from_slice(&data).map_err(|e| {
+                                ClientError::Receive(ReceiveError::MalformedMessage(e.to_string()))
+                            });
+                        }
+                    }
+
+                    // Check if disconnected
+                    if !self.state.borrow().is_connected() {
+                        return Err(ClientError::Disconnected(DisconnectReason::ServerClosed));
+                    }
+
+                    // Yield to event loop
+                    let promise = js_sys::Promise::new(&mut |resolve, _| {
+                        let window = web_sys::window().unwrap();
+                        let closure = Closure::once(move || {
+                            resolve.call0(&JsValue::NULL).unwrap();
+                        });
+                        window
+                            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                                closure.as_ref().unchecked_ref(),
+                                10,
+                            )
+                            .unwrap();
+                        closure.forget();
+                    });
+                    let _ = JsFuture::from(promise).await;
                 }
-                self.buffer.extend(chunk);
-            }
-
-            let len = u32::from_be_bytes([
-                self.buffer[0],
-                self.buffer[1],
-                self.buffer[2],
-                self.buffer[3],
-            ]) as usize;
-
-            while self.buffer.len() < 4 + len {
-                let chunk = self.read_chunk().await?;
-                if chunk.is_empty() {
-                    *self.state.borrow_mut() =
-                        ConnectionState::Lost(DisconnectReason::ServerClosed);
-                    return Err(ClientError::Disconnected(DisconnectReason::ServerClosed));
+            } else {
+                // WebTransport: length-prefixed framing
+                while self.buffer.len() < 4 {
+                    let chunk = self.read_wt_chunk().await?;
+                    if chunk.is_empty() {
+                        *self.state.borrow_mut() =
+                            ConnectionState::Lost(DisconnectReason::ServerClosed);
+                        return Err(ClientError::Disconnected(DisconnectReason::ServerClosed));
+                    }
+                    self.buffer.extend(chunk);
                 }
-                self.buffer.extend(chunk);
+
+                let len = u32::from_be_bytes([
+                    self.buffer[0],
+                    self.buffer[1],
+                    self.buffer[2],
+                    self.buffer[3],
+                ]) as usize;
+
+                while self.buffer.len() < 4 + len {
+                    let chunk = self.read_wt_chunk().await?;
+                    if chunk.is_empty() {
+                        *self.state.borrow_mut() =
+                            ConnectionState::Lost(DisconnectReason::ServerClosed);
+                        return Err(ClientError::Disconnected(DisconnectReason::ServerClosed));
+                    }
+                    self.buffer.extend(chunk);
+                }
+
+                let msg_data: Vec<u8> = self.buffer.drain(..4 + len).skip(4).collect();
+
+                // Lobby uses JSON (RoomInfo.config is serde_json::Value)
+                serde_json::from_slice(&msg_data)
+                    .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
             }
-
-            let msg_data: Vec<u8> = self.buffer.drain(..4 + len).skip(4).collect();
-
-            bincode::deserialize(&msg_data)
-                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
         }
 
-        async fn read_chunk(&mut self) -> Result<Vec<u8>, ClientError> {
-            let result = JsFuture::from(self.reader.read()).await.map_err(|e| {
+        async fn read_wt_chunk(&mut self) -> Result<Vec<u8>, ClientError> {
+            let reader = match &self.transport {
+                LobbyTransport::WebTransport { reader, .. } => reader,
+                _ => return Err(ClientError::Receive(ReceiveError::NotConnected)),
+            };
+
+            let result = JsFuture::from(reader.read()).await.map_err(|e| {
                 *self.state.borrow_mut() =
                     ConnectionState::Lost(DisconnectReason::NetworkError(format!("{:?}", e)));
                 ClientError::Receive(ReceiveError::Stream(format!("{:?}", e)))
@@ -324,7 +475,14 @@ mod wasm {
 
         pub async fn close(self) -> Result<(), ClientError> {
             *self.state.borrow_mut() = ConnectionState::Lost(DisconnectReason::ClientClosed);
-            self._transport.close();
+            match self.transport {
+                LobbyTransport::WebTransport { _transport, .. } => {
+                    _transport.close();
+                }
+                LobbyTransport::WebSocket { ws, .. } => {
+                    let _ = ws.close();
+                }
+            }
             Ok(())
         }
     }

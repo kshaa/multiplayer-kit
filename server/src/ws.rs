@@ -300,7 +300,8 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> LobbyWsActor<T, 
                 loop {
                     match lobby_rx.recv().await {
                         Ok(event) => {
-                            if let Ok(bytes) = bincode::serialize(&event) {
+                            // Use JSON for lobby events (serde_json::Value in RoomInfo)
+                            if let Ok(bytes) = serde_json::to_vec(&event) {
                                 if addr.try_send(LobbyMessage(bytes)).is_err() {
                                     break;
                                 }
@@ -321,10 +322,10 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Actor for LobbyW
     fn started(&mut self, ctx: &mut Self::Context) {
         self.heartbeat(ctx);
 
-        // Send initial snapshot
+        // Send initial snapshot (use JSON for lobby events)
         let rooms = self.room_manager.get_all_rooms();
         let snapshot = LobbyEvent::Snapshot(rooms);
-        if let Ok(bytes) = bincode::serialize(&snapshot) {
+        if let Ok(bytes) = serde_json::to_vec(&snapshot) {
             ctx.binary(bytes);
         }
 

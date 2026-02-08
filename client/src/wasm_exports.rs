@@ -364,6 +364,23 @@ impl JsLobbyClient {
         })
     }
 
+    /// Auto-detect transport: try WebTransport first, fall back to WebSocket
+    #[wasm_bindgen(js_name = connectAuto)]
+    pub async fn connect_auto(
+        wt_url: &str,
+        ws_url: &str,
+        ticket: &str,
+        cert_hash_base64: Option<String>,
+    ) -> Result<JsLobbyClient, JsError> {
+        let inner =
+            crate::LobbyClient::connect_auto(wt_url, ws_url, ticket, cert_hash_base64.as_deref())
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Self {
+            inner: std::rc::Rc::new(std::cell::RefCell::new(inner)),
+        })
+    }
+
     #[wasm_bindgen(js_name = getState)]
     pub fn state(&self) -> JsConnectionState {
         self.inner.borrow().state().into()

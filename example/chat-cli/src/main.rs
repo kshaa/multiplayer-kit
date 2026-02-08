@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // State
     let mut in_room = false;
     let mut send_tx: Option<mpsc::Sender<String>> = None;
+    let mut actor_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Channel for stdin lines
     let (line_tx, mut line_rx) = mpsc::channel::<String>(10);
@@ -111,6 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         print!("\r\x1b[K[Disconnected]\n");
                         in_room = false;
                         send_tx = None;
+                        actor_handle = None; // Actor already terminated
                     }
                 }
                 // Reprint prompt
@@ -199,15 +201,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         match RoomConnection::connect(SERVER_QUIC, &ticket, resp.room_id).await {
                                             Ok(conn) => {
+                                                // Abort previous actor if any
+                                                if let Some(handle) = actor_handle.take() {
+                                                    handle.abort();
+                                                }
+
                                                 let (tx, rx) = mpsc::channel::<String>(256);
                                                 send_tx = Some(tx);
                                                 in_room = true;
 
                                                 let ui = ui_tx.clone();
                                                 let user = username.clone();
-                                                tokio::spawn(async move {
+                                                actor_handle = Some(tokio::spawn(async move {
                                                     run_chat_actor(conn, user, ui, rx).await;
-                                                });
+                                                }));
 
                                                 println!("Connected! Type messages or /leave to exit.");
                                             }
@@ -253,12 +260,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         send_tx = Some(tx);
                                         in_room = true;
 
+                                        // Abort previous actor if any
+                                        if let Some(handle) = actor_handle.take() {
+                                            handle.abort();
+                                        }
+
                                         // Spawn typed actor
                                         let ui = ui_tx.clone();
                                         let user = username.clone();
-                                        tokio::spawn(async move {
+                                        actor_handle = Some(tokio::spawn(async move {
                                             run_chat_actor(conn, user, ui, rx).await;
-                                        });
+                                        }));
                                     }
                                     Err(e) => {
                                         println!("Failed to connect: {}", e);
@@ -269,7 +281,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         "/leave" => {
                             if in_room {
-                                // Dropping send_tx will cause the actor to see the channel close
+                                // Abort the actor task and clean up
+                                if let Some(handle) = actor_handle.take() {
+                                    handle.abort();
+                                }
                                 send_tx = None;
                                 in_room = false;
                                 println!("Left room.");

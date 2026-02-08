@@ -381,4 +381,4 @@ pub use multiplayer_kit_helpers::JsTypedClientActor;
 
 // Re-export JsRoomConnection for typed actor usage
 #[cfg(feature = "wasm")]
-pub use multiplayer_kit_client::wasm_exports::JsRoomConnection;
+pub use multiplayer_kit_client::wasm_exports::{JsLobbyClient, JsRoomConnection};

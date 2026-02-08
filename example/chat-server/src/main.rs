@@ -34,6 +34,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .http_addr("127.0.0.1:8080")
         .quic_addr("127.0.0.1:8080")
         .jwt_secret(b"super-secret-key-for-dev-only")
+        // Allow dev server origins (npx serve uses port 3000)
+        .cors_origins(vec![
+            "http://localhost:3000".to_string(),
+            "http://127.0.0.1:3000".to_string(),
+            "http://localhost:8080".to_string(),
+            "http://127.0.0.1:8080".to_string(),
+        ])
         .auth_handler(|req: AuthRequest| async move {
             let body = req
                 .body

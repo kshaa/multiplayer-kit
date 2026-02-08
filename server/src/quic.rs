@@ -8,7 +8,6 @@ use crate::room::RoomManager;
 use crate::ticket::TicketManager;
 use multiplayer_kit_protocol::{ChannelId, LobbyEvent, RoomConfig, RoomId, UserContext};
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
 use wtransport::Connection;
 use wtransport::endpoint::IncomingSession;
 
@@ -29,7 +28,24 @@ pub async fn handle_session<T: UserContext, C: RoomConfig>(
 
     tracing::info!("Incoming session for path: {}", path);
 
-    if path == "/lobby" || path.starts_with("/lobby?") {
+    if path.starts_with("/lobby") {
+        // Parse: /lobby?ticket=...
+        let (_, query) = path.split_once('?').unwrap_or((&path, ""));
+
+        // Extract ticket from query params
+        let ticket = query
+            .split('&')
+            .find_map(|param| param.strip_prefix("ticket="))
+            .ok_or("Missing ticket query parameter")?;
+
+        // Validate ticket before accepting connection
+        let _user: T = state.ticket_manager.validate(ticket).map_err(|e| {
+            tracing::warn!("Invalid ticket for lobby: {:?}", e);
+            e
+        })?;
+
+        tracing::info!("Lobby client authenticated");
+
         let connection = session_request.accept().await?;
         handle_lobby_connection(connection, state).await
     } else if path.starts_with("/room/") {
@@ -65,7 +81,7 @@ pub async fn handle_session<T: UserContext, C: RoomConfig>(
     }
 }
 
-/// Handle a lobby WebTransport connection.
+/// Handle a lobby WebTransport connection (already authenticated via query param).
 async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
     connection: Connection,
     state: Arc<QuicState<T, C>>,
@@ -73,21 +89,10 @@ async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
     // Open a unidirectional stream to send lobby events
     let mut send_stream = connection.open_uni().await?.await?;
 
-    // First, authenticate via bidirectional stream - client sends ticket
-    let (_, recv_stream) = connection.accept_bi().await?;
-    let ticket = read_string(recv_stream).await?;
-
-    let _user: T = state.ticket_manager.validate(&ticket).map_err(|e| {
-        tracing::warn!("Invalid ticket for lobby: {:?}", e);
-        e
-    })?;
-
-    tracing::info!("Lobby client authenticated");
-
-    // Send initial snapshot
+    // Send initial snapshot (use JSON for lobby events with serde_json::Value)
     let rooms = state.room_manager.get_all_rooms();
     let snapshot = LobbyEvent::Snapshot(rooms);
-    write_message(&mut send_stream, &snapshot).await?;
+    write_json_message(&mut send_stream, &snapshot).await?;
 
     // Subscribe to lobby updates
     let mut rx = state.lobby.subscribe();
@@ -97,7 +102,7 @@ async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
             event = rx.recv() => {
                 match event {
                     Ok(event) => {
-                        if let Err(e) = write_message(&mut send_stream, &event).await {
+                        if let Err(e) = write_json_message(&mut send_stream, &event).await {
                             tracing::debug!("Lobby client disconnected: {:?}", e);
                             break;
                         }
@@ -245,29 +250,14 @@ async fn handle_channel_stream(
     }
 }
 
-// Helper functions for reading/writing messages
+// Helper functions for writing messages
 
-async fn read_string(
-    stream: wtransport::RecvStream,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let bytes = read_bytes(stream).await?;
-    Ok(String::from_utf8(bytes)?)
-}
-
-async fn read_bytes(
-    mut stream: wtransport::RecvStream,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    // Read all data from the stream
-    let mut data = Vec::new();
-    stream.read_to_end(&mut data).await?;
-    Ok(data)
-}
-
-async fn write_message<M: serde::Serialize>(
+/// Write a JSON message with length prefix (for lobby events with serde_json::Value).
+async fn write_json_message<M: serde::Serialize>(
     stream: &mut wtransport::SendStream,
     msg: &M,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let bytes = bincode::serialize(msg)?;
+    let bytes = serde_json::to_vec(msg)?;
     let len = (bytes.len() as u32).to_be_bytes();
     stream.write_all(&len).await?;
     stream.write_all(&bytes).await?;

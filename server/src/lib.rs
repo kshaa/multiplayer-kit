@@ -219,7 +219,13 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
 
         // Compute CORS origins
         let cors_origins: Vec<String> = if self.config.cors_origins.is_empty() {
-            // Derive from self_signed_hosts
+            // Derive from self_signed_hosts + configured HTTP port
+            let http_port = self
+                .config
+                .http_addr
+                .split(':')
+                .last()
+                .unwrap_or("8080");
             self.config
                 .self_signed_hosts
                 .iter()
@@ -227,8 +233,8 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
                     vec![
                         format!("http://{}", host),
                         format!("https://{}", host),
-                        format!("http://{}:8080", host),
-                        format!("https://{}:8080", host),
+                        format!("http://{}:{}", host, http_port),
+                        format!("https://{}:{}", host, http_port),
                     ]
                 })
                 .collect()
