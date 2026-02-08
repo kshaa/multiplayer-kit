@@ -42,13 +42,21 @@ WebTransport preferred (lower latency, multiplexed streams). WebSocket fallback 
 
 ### Development vs Production
 
-**Development** (self-signed certs):
+**Development / LAN** (self-signed certs):
 ```
 http://127.0.0.1:8080   → REST API
 https://127.0.0.1:8080  → WebTransport (needs cert hash)
 ws://127.0.0.1:8080     → WebSocket
 ```
 Client fetches `/cert-hash` to trust the self-signed certificate.
+
+For non-localhost (LAN, staging), configure the hostnames:
+```rust
+Server::builder()
+    .self_signed_hosts(["192.168.1.50", "game.local"])
+    // ...
+```
+Self-signed certs in production are possible but discouraged - browsers enforce max 14-day validity, requiring cert rotation and client refetch of `/cert-hash`. Use real TLS certs when possible.
 
 **Production** (real TLS certs):
 ```

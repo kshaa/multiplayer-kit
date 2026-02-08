@@ -59,6 +59,9 @@ pub struct ServerConfig {
     pub tls_cert: Option<String>,
     /// TLS private key PEM file path. Required if tls_cert is set.
     pub tls_key: Option<String>,
+    /// Hostnames/IPs for self-signed cert. Default: ["localhost", "127.0.0.1"].
+    /// Only used when tls_cert is None.
+    pub self_signed_hosts: Vec<String>,
 }
 
 impl ServerConfig {
@@ -71,6 +74,7 @@ impl ServerConfig {
             room_empty_timeout_secs: 300,         // 5 minutes
             tls_cert: None,
             tls_key: None,
+            self_signed_hosts: vec!["localhost".to_string(), "127.0.0.1".to_string()],
         }
     }
 }
@@ -124,8 +128,9 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
                 return Err(ServerError::Config("tls_key specified without tls_cert".into()));
             }
             (None, None) => {
-                tracing::info!("No TLS cert configured, generating self-signed certificate for development");
-                Identity::self_signed(["localhost", "127.0.0.1"])
+                let hosts: Vec<&str> = self.config.self_signed_hosts.iter().map(|s| s.as_str()).collect();
+                tracing::info!("Generating self-signed certificate for: {:?}", hosts);
+                Identity::self_signed(&hosts)
                     .map_err(|e| ServerError::Quic(e.to_string()))?
             }
         };

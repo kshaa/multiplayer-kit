@@ -63,6 +63,26 @@ impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
         self
     }
 
+    /// Set hostnames/IPs for self-signed certificate (dev mode).
+    /// Default: ["localhost", "127.0.0.1"].
+    /// Use this for LAN deployments without real TLS certs.
+    /// 
+    /// Note: Browser enforces max 14-day validity for self-signed certs.
+    /// Client must fetch `/cert-hash` to trust the certificate.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// .self_signed_hosts(["192.168.1.50", "game.local"])
+    /// ```
+    pub fn self_signed_hosts<I, S>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config.self_signed_hosts = hosts.into_iter().map(|s| s.into()).collect();
+        self
+    }
+
     /// Set the auth handler that validates requests and produces user context.
     pub fn auth_handler<F, Fut>(mut self, handler: F) -> Self
     where
