@@ -1370,12 +1370,16 @@ dependencies = [
 name = "multiplayer-kit-helpers"
 version = "0.1.0"
 dependencies = [
+ "futures",
+ "js-sys",
  "multiplayer-kit-client",
  "multiplayer-kit-protocol",
  "multiplayer-kit-server",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

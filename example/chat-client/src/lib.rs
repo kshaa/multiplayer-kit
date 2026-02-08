@@ -378,3 +378,11 @@ mod wasm {
 
 #[cfg(feature = "wasm")]
 pub use wasm::*;
+
+// Re-export typed actor for WASM
+#[cfg(feature = "wasm")]
+pub use multiplayer_kit_helpers::JsTypedClientActor;
+
+// Re-export JsRoomConnection for typed actor usage
+#[cfg(feature = "wasm")]
+pub use multiplayer_kit_client::wasm_exports::JsRoomConnection;

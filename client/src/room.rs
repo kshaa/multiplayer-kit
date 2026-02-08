@@ -23,8 +23,6 @@ mod native {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    const STATE_DISCONNECTED: u8 = 0;
-    const STATE_CONNECTING: u8 = 1;
     const STATE_CONNECTED: u8 = 2;
     const STATE_LOST: u8 = 3;
 
@@ -57,7 +55,6 @@ mod native {
     pub struct RoomConnection {
         transport: Transport,
         room_id: RoomId,
-        ticket: String,
         // WebTransport connection (if using WebTransport)
         wt_connection: Option<wtransport::Connection>,
         // WebSocket base URL (if using WebSocket)
@@ -141,7 +138,6 @@ mod native {
             Ok(Self {
                 transport: Transport::WebTransport,
                 room_id,
-                ticket: ticket.to_string(),
                 wt_connection: Some(connection),
                 ws_base_url: None,
                 state: Arc::new(AtomicU8::new(STATE_CONNECTED)),
@@ -168,7 +164,6 @@ mod native {
             Ok(Self {
                 transport: Transport::WebSocket,
                 room_id,
-                ticket: ticket.to_string(),
                 wt_connection: None,
                 ws_base_url: Some(base_url),
                 state: Arc::new(AtomicU8::new(STATE_CONNECTED)),
@@ -441,7 +436,6 @@ mod wasm {
     pub struct RoomConnection {
         transport: Transport,
         room_id: RoomId,
-        ticket: String,
         wt_transport: Option<wt::WebTransport>,
         ws_base_url: Option<String>,
         state: Rc<RefCell<ConnectionState>>,
@@ -550,7 +544,6 @@ mod wasm {
             Ok(Self {
                 transport: Transport::WebTransport,
                 room_id,
-                ticket: ticket.to_string(),
                 wt_transport: Some(transport),
                 ws_base_url: None,
                 state: Rc::new(RefCell::new(ConnectionState::Connected)),
@@ -571,7 +564,6 @@ mod wasm {
             Ok(Self {
                 transport: Transport::WebSocket,
                 room_id,
-                ticket: ticket.to_string(),
                 wt_transport: None,
                 ws_base_url: Some(base_url),
                 state: Rc::new(RefCell::new(ConnectionState::Connected)),

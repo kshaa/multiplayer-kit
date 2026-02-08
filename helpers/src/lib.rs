@@ -42,3 +42,7 @@ pub use typed::{TypedEvent, TypedContext, with_typed_actor};
 // Client-specific typed exports (native)
 #[cfg(feature = "client")]
 pub use typed::{TypedClientEvent, TypedClientContext, with_typed_client_actor};
+
+// Client-specific typed exports (WASM)
+#[cfg(feature = "wasm")]
+pub use typed::JsTypedClientActor;

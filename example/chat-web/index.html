@@ -184,17 +184,20 @@
     </div>
 
     <script type="module">
-        import init, { JsApiClient, JsChatClient } from './pkg/chat_client.js';
+        import init, { JsApiClient, JsRoomConnection, JsTypedClientActor } from './pkg/chat_client.js';
 
         const SERVER_HTTP = 'http://127.0.0.1:8080';
         const SERVER_WT = 'https://127.0.0.1:4433';
         const SERVER_WS = 'ws://127.0.0.1:8080';
 
+        // Chat channel ID (from ChatProtocol)
+        const CHAT_CHANNEL_ID = 0;
+
         let api = null;
         let ticket = null;
         let username = null;
         let certHash = null;
-        let chatClient = null;
+        let actor = null;
         let inRoom = false;
 
         // Make functions available globally
@@ -260,7 +263,6 @@
                 select.innerHTML = '<option value="">-- select room --</option>';
                 for (const room of rooms) {
                     const opt = document.createElement('option');
-                    // room.id might be BigInt from u64, convert to Number
                     const id = typeof room.id === 'bigint' ? Number(room.id) : room.id;
                     opt.value = id;
                     opt.textContent = `Room ${id} (${room.player_count} players)`;
@@ -275,7 +277,6 @@
             if (!ticket) return;
             try {
                 const resp = await api.createRoom(ticket);
-                // room_id might be BigInt from u64
                 const id = typeof resp.room_id === 'bigint' ? Number(resp.room_id) : resp.room_id;
                 log('created room ' + id, true);
                 await refreshRooms();
@@ -300,58 +301,163 @@
             try {
                 log('connecting to room ' + roomId + '...', true);
 
-                chatClient = await JsChatClient.connectAuto(
+                // Connect via JsRoomConnection (auto-detects WebTransport/WebSocket)
+                const conn = await JsRoomConnection.connectAuto(
                     SERVER_WT,
                     SERVER_WS,
                     ticket,
                     roomId,
                     certHash
                 );
-                
+
+                console.log(`Using ${conn.transport} transport`);
+
+                // Create typed actor with Chat channel
+                actor = await JsTypedClientActor.connect(conn, [CHAT_CHANNEL_ID]);
                 inRoom = true;
                 setStatus('connected (room ' + roomId + ')', true);
-                log('joined room ' + roomId, true);
 
-                receiveLoop();
+                // Start actor event loop
+                runActorLoop();
             } catch (e) {
                 log('failed to join room: ' + e.message, true);
                 setStatus('connection failed');
             }
         }
 
-        async function receiveLoop() {
-            while (inRoom && chatClient) {
+        async function runActorLoop() {
+            while (inRoom && actor && actor.connected) {
                 try {
-                    const msg = await chatClient.receiveText();
-                    if (msg === null) break;
-                    log(msg);
+                    const event = await actor.recv();
+                    if (event === null) {
+                        break;
+                    }
+
+                    handleActorEvent(event);
                 } catch (e) {
                     if (inRoom) {
-                        log('connection lost: ' + e.message, true);
+                        log('error: ' + e.message, true);
                     }
                     break;
                 }
             }
-            
+
             if (inRoom) {
                 inRoom = false;
-                chatClient = null;
+                actor = null;
                 setStatus('disconnected');
+                log('disconnected', true);
             }
+        }
+
+        function handleActorEvent(event) {
+            switch (event.type) {
+                case 'connected':
+                    log('all channels ready', true);
+                    break;
+
+                case 'message':
+                    // Decode the message (bincode-serialized ChatMessage)
+                    try {
+                        const msg = decodeChatMessage(event.data);
+                        if (msg) {
+                            log(msg);
+                        }
+                    } catch (e) {
+                        console.error('Failed to decode message:', e);
+                    }
+                    break;
+
+                case 'disconnected':
+                    log('connection lost', true);
+                    break;
+            }
+        }
+
+        // Simple bincode decoder for ChatMessage enum
+        // ChatMessage is: Text { username: String, content: String } or System(String)
+        function decodeChatMessage(data) {
+            const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+            let offset = 0;
+
+            // Read variant index (u32)
+            const variant = view.getUint32(offset, true);
+            offset += 4;
+
+            if (variant === 0) {
+                // Text { username, content }
+                // Read username (length-prefixed string)
+                const usernameLen = Number(view.getBigUint64(offset, true));
+                offset += 8;
+                const usernameBytes = data.slice(offset, offset + usernameLen);
+                offset += usernameLen;
+                const msgUsername = new TextDecoder().decode(usernameBytes);
+
+                // Read content
+                const contentLen = Number(view.getBigUint64(offset, true));
+                offset += 8;
+                const contentBytes = data.slice(offset, offset + contentLen);
+                const content = new TextDecoder().decode(contentBytes);
+
+                return `${msgUsername}: ${content}`;
+            } else if (variant === 1) {
+                // System(String)
+                const msgLen = Number(view.getBigUint64(offset, true));
+                offset += 8;
+                const msgBytes = data.slice(offset, offset + msgLen);
+                return new TextDecoder().decode(msgBytes);
+            }
+
+            return null;
+        }
+
+        // Encode ChatMessage::Text for sending
+        function encodeChatMessage(username, content) {
+            const usernameBytes = new TextEncoder().encode(username);
+            const contentBytes = new TextEncoder().encode(content);
+
+            // variant(4) + username_len(8) + username + content_len(8) + content
+            const totalLen = 4 + 8 + usernameBytes.length + 8 + contentBytes.length;
+            const buffer = new ArrayBuffer(totalLen);
+            const view = new DataView(buffer);
+            const bytes = new Uint8Array(buffer);
+
+            let offset = 0;
+
+            // Variant 0 = Text
+            view.setUint32(offset, 0, true);
+            offset += 4;
+
+            // Username length
+            view.setBigUint64(offset, BigInt(usernameBytes.length), true);
+            offset += 8;
+
+            // Username bytes
+            bytes.set(usernameBytes, offset);
+            offset += usernameBytes.length;
+
+            // Content length
+            view.setBigUint64(offset, BigInt(contentBytes.length), true);
+            offset += 8;
+
+            // Content bytes
+            bytes.set(contentBytes, offset);
+
+            return bytes;
         }
 
         function leaveRoom() {
             if (!inRoom) return;
-            
+
             inRoom = false;
-            chatClient = null;
-            
+            actor = null;
+
             setStatus('disconnected');
             log('left room', true);
         }
 
         async function sendMessage() {
-            if (!inRoom || !chatClient) {
+            if (!inRoom || !actor) {
                 log('not in a room', true);
                 return;
             }
@@ -361,12 +467,14 @@
             if (!text) return;
 
             input.value = '';
-            
-            const msg = `${username}: ${text}`;
-            log(msg, false, true); // local echo
+
+            // Local echo
+            log(`${username}: ${text}`, false, true);
 
             try {
-                await chatClient.sendText(msg);
+                // Encode and send via typed actor
+                const msgBytes = encodeChatMessage(username, text);
+                actor.send(CHAT_CHANNEL_ID, msgBytes);
             } catch (e) {
                 log('send failed: ' + e.message, true);
             }

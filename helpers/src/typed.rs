@@ -3,7 +3,9 @@
 //! Provides strongly-typed channels with automatic serialization.
 //! Each channel has its own message type, identified on first message.
 
+#[cfg(feature = "server")]
 use std::future::Future;
+#[cfg(feature = "server")]
 use std::pin::Pin;
 
 // ============================================================================
@@ -600,3 +602,196 @@ mod client {
 
 #[cfg(feature = "client")]
 pub use client::{TypedClientEvent, TypedClientContext, with_typed_client_actor};
+
+// ============================================================================
+// Client-side typed actor (WASM)
+// ============================================================================
+
+#[cfg(feature = "wasm")]
+mod wasm_client {
+    use crate::framing::{frame_message, MessageBuffer};
+    use futures::{FutureExt, StreamExt};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsValue;
+
+    /// WASM typed client actor.
+    /// 
+    /// Connects to a room, opens typed channels, and delivers events to a callback.
+    #[wasm_bindgen]
+    pub struct JsTypedClientActor {
+        /// Send channel for outgoing messages, keyed by channel id byte.
+        write_channels: Rc<RefCell<HashMap<u8, futures::channel::mpsc::UnboundedSender<Vec<u8>>>>>,
+        /// Receive channel for events.
+        event_rx: Rc<RefCell<futures::channel::mpsc::UnboundedReceiver<JsValue>>>,
+        /// Whether we're still connected.
+        connected: Rc<RefCell<bool>>,
+    }
+
+    #[wasm_bindgen]
+    impl JsTypedClientActor {
+        /// Connect and open all channels for a protocol.
+        /// 
+        /// `channel_ids` is an array of channel ID bytes to open.
+        /// Returns a client actor that can receive events and send messages.
+        #[wasm_bindgen(js_name = connect)]
+        pub async fn connect(
+            conn: &multiplayer_kit_client::wasm_exports::JsRoomConnection,
+            channel_ids: Vec<u8>,
+        ) -> Result<JsTypedClientActor, JsError> {
+            let (event_tx, event_rx) = futures::channel::mpsc::unbounded::<JsValue>();
+            let write_channels: Rc<RefCell<HashMap<u8, futures::channel::mpsc::UnboundedSender<Vec<u8>>>>> =
+                Rc::new(RefCell::new(HashMap::new()));
+            let connected = Rc::new(RefCell::new(true));
+
+            for &channel_id in &channel_ids {
+                let channel: multiplayer_kit_client::wasm_exports::JsChannel = conn.open_channel().await?;
+
+                let (write_tx, write_rx) = futures::channel::mpsc::unbounded::<Vec<u8>>();
+                write_channels.borrow_mut().insert(channel_id, write_tx);
+
+                let tx = event_tx.clone();
+                let conn_flag = Rc::clone(&connected);
+
+                wasm_bindgen_futures::spawn_local(async move {
+                    run_wasm_client_channel(channel, channel_id, tx, write_rx, conn_flag).await;
+                });
+            }
+
+            // Send Connected event
+            let connected_event = js_sys::Object::new();
+            js_sys::Reflect::set(&connected_event, &"type".into(), &"connected".into()).unwrap();
+            let _ = event_tx.unbounded_send(connected_event.into());
+
+            Ok(JsTypedClientActor {
+                write_channels,
+                event_rx: Rc::new(RefCell::new(event_rx)),
+                connected,
+            })
+        }
+
+        /// Receive the next event.
+        /// 
+        /// Returns an object with:
+        /// - `type`: "connected" | "message" | "disconnected"
+        /// - `channelId`: (for message) the channel ID byte
+        /// - `data`: (for message) Uint8Array of message bytes
+        /// 
+        /// Returns `null` when disconnected.
+        #[wasm_bindgen(js_name = recv)]
+        pub async fn recv(&self) -> Result<JsValue, JsError> {
+            use futures::StreamExt;
+            
+            let event = {
+                let mut rx = self.event_rx.borrow_mut();
+                rx.next().await
+            };
+
+            match event {
+                Some(e) => Ok(e),
+                None => Ok(JsValue::NULL),
+            }
+        }
+
+        /// Send a message on a specific channel.
+        /// 
+        /// `channel_id` is the channel ID byte.
+        /// `data` is the raw message bytes (will be framed automatically).
+        #[wasm_bindgen(js_name = send)]
+        pub fn send(&self, channel_id: u8, data: &[u8]) -> Result<(), JsError> {
+            let framed = frame_message(data);
+            let channels = self.write_channels.borrow();
+            if let Some(tx) = channels.get(&channel_id) {
+                tx.unbounded_send(framed)
+                    .map_err(|_| JsError::new("Channel closed"))?;
+            } else {
+                return Err(JsError::new(&format!("Unknown channel: {}", channel_id)));
+            }
+            Ok(())
+        }
+
+        /// Check if still connected.
+        #[wasm_bindgen(getter)]
+        pub fn connected(&self) -> bool {
+            *self.connected.borrow()
+        }
+    }
+
+    async fn run_wasm_client_channel(
+        channel: multiplayer_kit_client::wasm_exports::JsChannel,
+        channel_id: u8,
+        event_tx: futures::channel::mpsc::UnboundedSender<JsValue>,
+        mut write_rx: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
+        connected: Rc<RefCell<bool>>,
+    ) {
+        // Send channel identification
+        let id_msg = frame_message(&[channel_id]);
+        if channel.write(&id_msg).await.is_err() {
+            send_disconnect(&event_tx, &connected);
+            return;
+        }
+
+        let mut buffer = MessageBuffer::new();
+
+        loop {
+            futures::select! {
+                result = channel.read().fuse() => {
+                    match result {
+                        Ok(data) if !data.is_empty() => {
+                            let results: Vec<_> = buffer.push(&data).collect();
+                            for result in results {
+                                match result {
+                                    Ok(msg_data) => {
+                                        // Create message event
+                                        let event = js_sys::Object::new();
+                                        js_sys::Reflect::set(&event, &"type".into(), &"message".into()).unwrap();
+                                        js_sys::Reflect::set(&event, &"channelId".into(), &JsValue::from(channel_id)).unwrap();
+                                        let arr = js_sys::Uint8Array::from(&msg_data[..]);
+                                        js_sys::Reflect::set(&event, &"data".into(), &arr).unwrap();
+                                        let _ = event_tx.unbounded_send(event.into());
+                                    }
+                                    Err(_) => {
+                                        send_disconnect(&event_tx, &connected);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            send_disconnect(&event_tx, &connected);
+                            return;
+                        }
+                    }
+                }
+                msg = write_rx.next().fuse() => {
+                    if let Some(data) = msg {
+                        if channel.write(&data).await.is_err() {
+                            send_disconnect(&event_tx, &connected);
+                            return;
+                        }
+                    } else {
+                        // Write channel closed
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn send_disconnect(
+        event_tx: &futures::channel::mpsc::UnboundedSender<JsValue>,
+        connected: &Rc<RefCell<bool>>,
+    ) {
+        if *connected.borrow() {
+            *connected.borrow_mut() = false;
+            let event = js_sys::Object::new();
+            js_sys::Reflect::set(&event, &"type".into(), &"disconnected".into()).unwrap();
+            let _ = event_tx.unbounded_send(event.into());
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+pub use wasm_client::JsTypedClientActor;

@@ -32,12 +32,12 @@ WebTransport at `https://127.0.0.1:4433`:
 Build the WASM chat-client first:
 ```bash
 cd example/chat-client
-wasm-pack build --target web --out-dir ../web/pkg --no-default-features --features wasm
+wasm-pack build --target web --out-dir ../chat-web/pkg --no-default-features --features wasm
 ```
 
 Then serve the web directory:
 ```bash
-npx serve example/web
+npx serve example/chat-web
 ```
 
 Open `http://localhost:3000` in Chrome/Edge (WebTransport required).
