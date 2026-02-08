@@ -220,12 +220,7 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
         // Compute CORS origins
         let cors_origins: Vec<String> = if self.config.cors_origins.is_empty() {
             // Derive from self_signed_hosts + configured HTTP port
-            let http_port = self
-                .config
-                .http_addr
-                .split(':')
-                .last()
-                .unwrap_or("8080");
+            let http_port = self.config.http_addr.split(':').last().unwrap_or("8080");
             self.config
                 .self_signed_hosts
                 .iter()
@@ -346,7 +341,10 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
 }
 
 /// Load rustls config from PEM files for HTTP TLS.
-fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerConfig, ServerError> {
+fn load_rustls_config(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<rustls::ServerConfig, ServerError> {
     use std::fs::File;
     use std::io::BufReader;
 
@@ -363,7 +361,9 @@ fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerC
         .collect();
 
     if certs.is_empty() {
-        return Err(ServerError::Config("No certificates found in cert file".into()));
+        return Err(ServerError::Config(
+            "No certificates found in cert file".into(),
+        ));
     }
 
     let key = rustls_pemfile::private_key(&mut key_reader)

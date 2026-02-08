@@ -178,7 +178,11 @@ mod wasm {
                     Ok(client) => return Ok(client),
                     Err(e) => {
                         web_sys::console::warn_1(
-                            &format!("WebTransport lobby failed, falling back to WebSocket: {:?}", e).into(),
+                            &format!(
+                                "WebTransport lobby failed, falling back to WebSocket: {:?}",
+                                e
+                            )
+                            .into(),
                         );
                     }
                 }
@@ -311,14 +315,12 @@ mod wasm {
 
             // Set up error handler
             let state_clone = state.clone();
-            let on_error = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(
-                move |_: web_sys::ErrorEvent| {
-                    *state_clone.borrow_mut() =
-                        ConnectionState::Lost(DisconnectReason::NetworkError(
-                            "WebSocket error".to_string(),
-                        ));
-                },
-            );
+            let on_error =
+                Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |_: web_sys::ErrorEvent| {
+                    *state_clone.borrow_mut() = ConnectionState::Lost(
+                        DisconnectReason::NetworkError("WebSocket error".to_string()),
+                    );
+                });
             ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
             on_error.forget();
 
@@ -439,8 +441,9 @@ mod wasm {
                 let msg_data: Vec<u8> = self.buffer.drain(..4 + len).skip(4).collect();
 
                 // Lobby uses JSON (RoomInfo.config is serde_json::Value)
-                serde_json::from_slice(&msg_data)
-                    .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
+                serde_json::from_slice(&msg_data).map_err(|e| {
+                    ClientError::Receive(ReceiveError::MalformedMessage(e.to_string()))
+                })
             }
         }
 

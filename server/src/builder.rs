@@ -80,10 +80,10 @@ impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
     /// Set hostnames/IPs for self-signed certificate (dev mode).
     /// Default: ["localhost", "127.0.0.1"].
     /// Use this for LAN deployments without real TLS certs.
-    /// 
+    ///
     /// Note: Browser enforces max 14-day validity for self-signed certs.
     /// Client must fetch `/cert-hash` to trust the certificate.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// .self_signed_hosts(["192.168.1.50", "game.local"])
@@ -106,7 +106,7 @@ impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
     /// Set allowed CORS origins.
     /// If not set, derives from self_signed_hosts (http://host for each).
     /// Use ["*"] to allow all origins (not recommended for production).
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// .cors_origins(["https://game.example.com", "https://staging.example.com"])
