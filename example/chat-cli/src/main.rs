@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 const SERVER_HTTP: &str = "http://127.0.0.1:8080";
-const SERVER_QUIC: &str = "https://127.0.0.1:4433";
+const SERVER_QUIC: &str = "https://127.0.0.1:8080";
 
 #[derive(Serialize)]
 struct AuthRequest {

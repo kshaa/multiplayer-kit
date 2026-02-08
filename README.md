@@ -30,13 +30,47 @@ Generic multiplayer server and client library for real-time games. WebTransport 
 
 | Transport | Default | Path | Description |
 |-----------|---------|------|-------------|
-| WebTransport | `https://host:4433` | `/room/{id}?ticket=...` | QUIC-based, multi-stream |
-| WebTransport | `https://host:4433` | `/lobby` | Live room list updates |
-| WebSocket | `ws://host:8080` | `/ws/room/{id}?ticket=...` | Fallback for Safari |
+| WebTransport | `https://host:8080` (UDP) | `/room/{id}?ticket=...` | QUIC-based, multi-stream |
+| WebTransport | `https://host:8080` (UDP) | `/lobby` | Live room list updates |
+| WebSocket | `ws://host:8080` (TCP) | `/ws/room/{id}?ticket=...` | Fallback for Safari |
+
+Same port, different protocols - TCP for HTTP/WebSocket, UDP for QUIC/WebTransport.
 
 **Auth flow:** Both transports authenticate via query param. Server validates ticket before accepting. Each bi-stream (WebTransport) or connection (WebSocket) becomes a channel.
 
 WebTransport preferred (lower latency, multiplexed streams). WebSocket fallback when unavailable.
+
+### Development vs Production
+
+**Development** (self-signed certs):
+```
+http://127.0.0.1:8080   → REST API
+https://127.0.0.1:8080  → WebTransport (needs cert hash)
+ws://127.0.0.1:8080     → WebSocket
+```
+Client fetches `/cert-hash` to trust the self-signed certificate.
+
+**Production** (real TLS certs):
+```
+https://game.example.com:443  → REST API (TCP)
+https://game.example.com:443  → WebTransport (UDP)
+wss://game.example.com:443    → WebSocket (TCP)
+```
+- Same domain, same port (443)
+- TCP and UDP don't conflict - OS distinguishes by protocol
+- No cert hash needed - browsers trust the CA (e.g., Let's Encrypt)
+- No reverse proxy needed - server handles TLS directly
+
+```rust
+Server::builder()
+    .http_addr("0.0.0.0:443")
+    .quic_addr("0.0.0.0:443")
+    .tls_cert("/etc/letsencrypt/live/game.example.com/fullchain.pem")
+    .tls_key("/etc/letsencrypt/live/game.example.com/privkey.pem")
+    // ...
+```
+
+Note: Traditional reverse proxies (nginx, HAProxy) don't support QUIC well. Deploy the server directly or use a QUIC-aware proxy.
 
 ## Crates
 

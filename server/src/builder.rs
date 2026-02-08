@@ -49,6 +49,20 @@ impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
         self
     }
 
+    /// Set TLS certificate PEM file path.
+    /// If not set, a self-signed certificate is generated for development.
+    pub fn tls_cert(mut self, path: impl Into<String>) -> Self {
+        self.config.tls_cert = Some(path.into());
+        self
+    }
+
+    /// Set TLS private key PEM file path.
+    /// Required if tls_cert is set.
+    pub fn tls_key(mut self, path: impl Into<String>) -> Self {
+        self.config.tls_key = Some(path.into());
+        self
+    }
+
     /// Set the auth handler that validates requests and produces user context.
     pub fn auth_handler<F, Fut>(mut self, handler: F) -> Self
     where

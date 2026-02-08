@@ -17,9 +17,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     println!("Starting chat server...");
-    println!("  HTTP: http://127.0.0.1:8080");
-    println!("  QUIC: https://127.0.0.1:4433");
-    println!("  WS:   ws://127.0.0.1:8080/ws/room/{{id}}?ticket=...");
+    println!("  HTTP/WS: http://127.0.0.1:8080 (TCP)");
+    println!("  QUIC:    https://127.0.0.1:8080 (UDP)");
+    println!("  (Same port, different protocols)");
     println!();
     println!("Endpoints:");
     println!("  POST /ticket         - Get auth ticket (body: {{\"username\": \"name\"}})");
@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server = Server::<ChatUser, ChatRoomConfig>::builder()
         .http_addr("127.0.0.1:8080")
-        .quic_addr("127.0.0.1:4433")
+        .quic_addr("127.0.0.1:8080")
         .jwt_secret(b"super-secret-key-for-dev-only")
         .auth_handler(|req: AuthRequest| async move {
             let body = req.body.ok_or(RejectReason::Custom("Missing body".into()))?;

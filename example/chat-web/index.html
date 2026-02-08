@@ -187,8 +187,10 @@
     <script type="module">
         import init, { JsApiClient, JsRoomConnection, JsTypedClientActor } from './pkg/chat_client.js';
 
+        // All on same port - different protocols (TCP vs UDP)
+        // Override these if you need separate ports
         const SERVER_HTTP = 'http://127.0.0.1:8080';
-        const SERVER_WT = 'https://127.0.0.1:4433';
+        const SERVER_WT = 'https://127.0.0.1:8080';
         const SERVER_WS = 'ws://127.0.0.1:8080';
 
         // Chat channel ID (from ChatProtocol)

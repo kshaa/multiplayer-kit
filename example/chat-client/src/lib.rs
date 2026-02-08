@@ -9,7 +9,7 @@
 //! ```ignore
 //! use chat_client::ChatClient;
 //!
-//! let mut client = ChatClient::connect("https://127.0.0.1:4433", &ticket, room_id).await?;
+//! let mut client = ChatClient::connect("https://127.0.0.1:8080", &ticket, room_id).await?;
 //!
 //! client.send_text("hello").await?;
 //!

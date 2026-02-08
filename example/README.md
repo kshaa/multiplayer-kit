@@ -25,9 +25,11 @@ cargo run --bin chat-cli
 | POST | `/quickplay` | Auto-join or create room. Requires ticket. |
 | GET | `/cert-hash` | Get WebTransport certificate hash |
 
-WebTransport at `https://127.0.0.1:4433`:
-- `/lobby` - Live room list updates
-- `/room/{id}` - Join room chat
+WebTransport (QUIC/UDP) at `https://127.0.0.1:8080`:
+- `/room/{id}?ticket=...` - Join room
+
+WebSocket (TCP) at `ws://127.0.0.1:8080`:
+- `/ws/room/{id}?ticket=...` - Fallback for Safari
 
 ## Web Client
 

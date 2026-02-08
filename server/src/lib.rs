@@ -43,7 +43,7 @@ pub struct Server<T: UserContext + Unpin, C: RoomConfig = SimpleConfig> {
 }
 
 /// Configuration for the server.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ServerConfig {
     /// Address to bind HTTP server.
     pub http_addr: String,
@@ -55,16 +55,22 @@ pub struct ServerConfig {
     pub room_first_connect_timeout_secs: u64,
     /// Timeout when room becomes empty.
     pub room_empty_timeout_secs: u64,
+    /// TLS certificate PEM file path. If None, generates self-signed cert.
+    pub tls_cert: Option<String>,
+    /// TLS private key PEM file path. Required if tls_cert is set.
+    pub tls_key: Option<String>,
 }
 
-impl Default for ServerConfig {
+impl ServerConfig {
     fn default() -> Self {
         Self {
             http_addr: "0.0.0.0:8080".to_string(),
-            quic_addr: "0.0.0.0:4433".to_string(),
+            quic_addr: "0.0.0.0:8080".to_string(),  // Same port, different protocol (UDP vs TCP)
             room_max_lifetime_secs: 3600,         // 1 hour
             room_first_connect_timeout_secs: 300, // 5 minutes
             room_empty_timeout_secs: 300,         // 5 minutes
+            tls_cert: None,
+            tls_key: None,
         }
     }
 }
@@ -103,9 +109,26 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
         let ticket_manager = Arc::new(TicketManager::new(&self.jwt_secret));
         let lobby = Arc::new(Lobby::new());
 
-        // Generate self-signed certificate for development
-        let identity = Identity::self_signed(["localhost", "127.0.0.1"])
-            .map_err(|e| ServerError::Quic(e.to_string()))?;
+        // Load TLS identity - either from files or generate self-signed
+        let identity = match (&self.config.tls_cert, &self.config.tls_key) {
+            (Some(cert_path), Some(key_path)) => {
+                tracing::info!("Loading TLS certificate from {} and key from {}", cert_path, key_path);
+                Identity::load_pemfiles(cert_path, key_path)
+                    .await
+                    .map_err(|e| ServerError::Quic(format!("Failed to load TLS cert/key: {}", e)))?
+            }
+            (Some(_), None) => {
+                return Err(ServerError::Config("tls_cert specified without tls_key".into()));
+            }
+            (None, Some(_)) => {
+                return Err(ServerError::Config("tls_key specified without tls_cert".into()));
+            }
+            (None, None) => {
+                tracing::info!("No TLS cert configured, generating self-signed certificate for development");
+                Identity::self_signed(["localhost", "127.0.0.1"])
+                    .map_err(|e| ServerError::Quic(e.to_string()))?
+            }
+        };
 
         // Get certificate hash for browser WebTransport
         let cert_hash_b64 = identity
