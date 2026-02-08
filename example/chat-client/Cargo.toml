@@ -10,13 +10,20 @@ crate-type = ["cdylib", "rlib"]
 multiplayer-kit-client = { path = "../../client", default-features = false }
 multiplayer-kit-helpers = { path = "../../helpers", default-features = false }
 multiplayer-kit-protocol = { path = "../../protocol" }
+chat-protocol = { path = "../chat-protocol" }
 
 thiserror = "1"
+bincode = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["sync", "rt"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 
 [features]
 default = ["native"]
-native = ["multiplayer-kit-client/native", "multiplayer-kit-helpers/client"]
+native = ["multiplayer-kit-client/native", "multiplayer-kit-helpers/client", "tokio/rt"]
 wasm = ["multiplayer-kit-client/wasm", "multiplayer-kit-helpers/wasm", "wasm-bindgen", "wasm-bindgen-futures", "js-sys"]

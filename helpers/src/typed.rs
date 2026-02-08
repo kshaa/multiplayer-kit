@@ -1,0 +1,602 @@
+//! Typed actor helpers for server and client.
+//!
+//! Provides strongly-typed channels with automatic serialization.
+//! Each channel has its own message type, identified on first message.
+
+use std::future::Future;
+use std::pin::Pin;
+
+// ============================================================================
+// TypedProtocol trait - game implements this
+// ============================================================================
+
+/// Error when decoding a message.
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    #[error("unknown channel id: {0}")]
+    UnknownChannel(u8),
+    #[error("deserialization failed: {0}")]
+    Deserialize(String),
+}
+
+/// Error when encoding a message.
+#[derive(Debug, thiserror::Error)]
+pub enum EncodeError {
+    #[error("serialization failed: {0}")]
+    Serialize(String),
+}
+
+/// Protocol trait - game defines channel types and message types.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// pub enum GameChannel { Chat, GameState }
+///
+/// #[derive(Serialize, Deserialize)]
+/// pub enum ChatMessage { Text(String), Emote(String) }
+///
+/// #[derive(Serialize, Deserialize)]  
+/// pub enum GameStateMessage { Position { x: f32, y: f32 } }
+///
+/// pub enum GameEvent {
+///     Chat(ChatMessage),
+///     GameState(GameStateMessage),
+/// }
+///
+/// pub struct MyProtocol;
+/// impl TypedProtocol for MyProtocol {
+///     type Channel = GameChannel;
+///     type Event = GameEvent;
+///     // ...
+/// }
+/// ```
+pub trait TypedProtocol: Send + Sync + 'static {
+    /// Channel identifier enum.
+    type Channel: Copy + Eq + std::hash::Hash + Send + Sync + 'static;
+
+    /// Unified event enum (wraps all channel message types).
+    type Event: Send + 'static;
+
+    /// Get channel ID byte from channel.
+    fn channel_to_id(channel: Self::Channel) -> u8;
+
+    /// Get channel from ID byte.
+    fn channel_from_id(id: u8) -> Option<Self::Channel>;
+
+    /// List all channel types (for client to open all).
+    fn all_channels() -> &'static [Self::Channel];
+
+    /// Decode bytes from a channel into an event.
+    fn decode(channel: Self::Channel, data: &[u8]) -> Result<Self::Event, DecodeError>;
+
+    /// Encode an event to (channel, bytes).
+    fn encode(event: &Self::Event) -> Result<(Self::Channel, Vec<u8>), EncodeError>;
+}
+
+// ============================================================================
+// Server-side typed actor
+// ============================================================================
+
+#[cfg(feature = "server")]
+mod server {
+    use super::*;
+    use crate::framing::{frame_message, MessageBuffer};
+    use multiplayer_kit_protocol::{ChannelId, RoomId, UserContext};
+    use std::collections::HashMap;
+    use std::marker::PhantomData;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    /// Events delivered to a typed server actor.
+    #[derive(Debug)]
+    pub enum TypedEvent<T: UserContext, P: TypedProtocol> {
+        /// User connected (all channels established).
+        UserConnected(T),
+        /// User disconnected (any channel failed or clean disconnect).
+        UserDisconnected(T),
+        /// Message received.
+        Message {
+            sender: T,
+            channel: P::Channel,
+            event: P::Event,
+        },
+        /// Room is shutting down.
+        Shutdown,
+    }
+
+    /// Context for server-side typed actor.
+    pub struct TypedContext<T: UserContext, P: TypedProtocol> {
+        room_id: RoomId,
+        handle: multiplayer_kit_server::RoomHandle<T>,
+        /// Maps channel_id -> (user, channel_type)
+        user_channels: Arc<tokio::sync::RwLock<HashMap<ChannelId, (T, P::Channel)>>>,
+        _phantom: PhantomData<P>,
+    }
+
+    impl<T: UserContext, P: TypedProtocol> TypedContext<T, P> {
+        /// Get the room ID.
+        pub fn room_id(&self) -> RoomId {
+            self.room_id
+        }
+
+        /// Broadcast event to all channels of the event's type.
+        pub async fn broadcast(&self, event: &P::Event) {
+            if let Ok((channel_type, data)) = P::encode(event) {
+                let framed = frame_message(&data);
+                let channels = self.user_channels.read().await;
+                for (channel_id, (_, ch_type)) in channels.iter() {
+                    if *ch_type == channel_type {
+                        self.handle.send_to(&[*channel_id], &framed).await;
+                    }
+                }
+            }
+        }
+
+        /// Broadcast event to all channels except sender's channel.
+        pub async fn broadcast_except(&self, exclude: ChannelId, event: &P::Event) {
+            if let Ok((channel_type, data)) = P::encode(event) {
+                let framed = frame_message(&data);
+                let channels = self.user_channels.read().await;
+                for (channel_id, (_, ch_type)) in channels.iter() {
+                    if *ch_type == channel_type && *channel_id != exclude {
+                        self.handle.send_to(&[*channel_id], &framed).await;
+                    }
+                }
+            }
+        }
+
+        /// Send to a specific user (all their channels of the event's type).
+        pub async fn send_to_user(&self, user: &T, event: &P::Event) {
+            if let Ok((channel_type, data)) = P::encode(event) {
+                let framed = frame_message(&data);
+                let channels = self.user_channels.read().await;
+                for (channel_id, (ch_user, ch_type)) in channels.iter() {
+                    if *ch_type == channel_type && ch_user.id() == user.id() {
+                        self.handle.send_to(&[*channel_id], &framed).await;
+                    }
+                }
+            }
+        }
+    }
+
+    impl<T: UserContext, P: TypedProtocol> Clone for TypedContext<T, P> {
+        fn clone(&self) -> Self {
+            Self {
+                room_id: self.room_id,
+                handle: self.handle.clone(),
+                user_channels: Arc::clone(&self.user_channels),
+                _phantom: PhantomData,
+            }
+        }
+    }
+
+    // Internal event type for actor communication
+    enum ServerInternalEvent<T: UserContext, P: TypedProtocol> {
+        UserReady(T),
+        UserGone(T),
+        Message {
+            sender: T,
+            #[allow(dead_code)]
+            channel_id: ChannelId,
+            channel_type: P::Channel,
+            event: P::Event,
+        },
+    }
+
+    /// Wrap a typed actor function for the server.
+    pub fn with_typed_actor<T, P, F, Fut>(
+        actor_fn: F,
+    ) -> impl Fn(multiplayer_kit_server::Room<T>) -> Pin<Box<dyn Future<Output = ()> + Send>>
+           + Send
+           + Sync
+           + Clone
+           + 'static
+    where
+        T: UserContext,
+        P: TypedProtocol,
+        F: Fn(TypedContext<T, P>, TypedEvent<T, P>) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let actor_fn = Arc::new(actor_fn);
+        move |room: multiplayer_kit_server::Room<T>| {
+            let actor_fn = Arc::clone(&actor_fn);
+            Box::pin(async move {
+                run_typed_server_actor::<T, P, F, Fut>(room, actor_fn).await;
+            })
+        }
+    }
+
+    /// Internal: run the typed server actor loop.
+    async fn run_typed_server_actor<T, P, F, Fut>(
+        mut room: multiplayer_kit_server::Room<T>,
+        actor_fn: Arc<F>,
+    ) where
+        T: UserContext,
+        P: TypedProtocol,
+        F: Fn(TypedContext<T, P>, TypedEvent<T, P>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        use multiplayer_kit_server::Accept;
+
+        let (event_tx, mut event_rx) = mpsc::channel::<ServerInternalEvent<T, P>>(256);
+
+        let user_channels: Arc<tokio::sync::RwLock<HashMap<ChannelId, (T, P::Channel)>>> =
+            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        let pending_users: Arc<
+            tokio::sync::RwLock<HashMap<T::Id, (T, HashMap<P::Channel, ChannelId>)>>,
+        > = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        let connected_users: Arc<tokio::sync::RwLock<HashMap<T::Id, T>>> =
+            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        let ctx = TypedContext {
+            room_id: room.room_id(),
+            handle: room.handle(),
+            user_channels: Arc::clone(&user_channels),
+            _phantom: PhantomData,
+        };
+
+        let expected_channels = P::all_channels().len();
+
+        loop {
+            tokio::select! {
+                accept = room.accept() => {
+                    match accept {
+                        Some(Accept::NewChannel(user, channel)) => {
+                            let channel_id = channel.id;
+                            let tx = event_tx.clone();
+                            let uc = Arc::clone(&user_channels);
+                            let pu = Arc::clone(&pending_users);
+                            let cu = Arc::clone(&connected_users);
+
+                            tokio::spawn(async move {
+                                handle_typed_channel::<T, P>(
+                                    channel, user, channel_id, tx, uc, pu, cu, expected_channels,
+                                )
+                                .await;
+                            });
+                        }
+                        Some(Accept::Closing) => {
+                            actor_fn(ctx.clone(), TypedEvent::Shutdown).await;
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                event = event_rx.recv() => {
+                    match event {
+                        Some(ServerInternalEvent::UserReady(user)) => {
+                            actor_fn(ctx.clone(), TypedEvent::UserConnected(user)).await;
+                        }
+                        Some(ServerInternalEvent::UserGone(user)) => {
+                            actor_fn(ctx.clone(), TypedEvent::UserDisconnected(user)).await;
+                        }
+                        Some(ServerInternalEvent::Message { sender, channel_id: _, channel_type, event }) => {
+                            actor_fn(
+                                ctx.clone(),
+                                TypedEvent::Message {
+                                    sender,
+                                    channel: channel_type,
+                                    event,
+                                },
+                            )
+                            .await;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
+        mut channel: multiplayer_kit_server::ServerChannel,
+        user: T,
+        channel_id: ChannelId,
+        event_tx: mpsc::Sender<ServerInternalEvent<T, P>>,
+        user_channels: Arc<tokio::sync::RwLock<HashMap<ChannelId, (T, P::Channel)>>>,
+        pending_users: Arc<tokio::sync::RwLock<HashMap<T::Id, (T, HashMap<P::Channel, ChannelId>)>>>,
+        connected_users: Arc<tokio::sync::RwLock<HashMap<T::Id, T>>>,
+        expected_channels: usize,
+    ) {
+        let user_id = user.id();
+        let mut buffer = MessageBuffer::new();
+
+        // First message identifies channel type
+        let channel_type: P::Channel;
+        'outer: loop {
+            let Some(data) = channel.read().await else {
+                return;
+            };
+
+            for result in buffer.push(&data) {
+                match result {
+                    Ok(msg) if msg.len() == 1 => {
+                        if let Some(ct) = P::channel_from_id(msg[0]) {
+                            channel_type = ct;
+                            break 'outer;
+                        }
+                        tracing::warn!("Unknown channel type: {}", msg[0]);
+                        return;
+                    }
+                    Ok(_) => {
+                        tracing::warn!("Invalid channel identification message");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Framing error during channel identification: {}", e);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Register channel
+        {
+            let mut uc = user_channels.write().await;
+            uc.insert(channel_id, (user.clone(), channel_type));
+        }
+
+        // Track for user connection status
+        let user_ready = {
+            let mut pending = pending_users.write().await;
+            let entry = pending
+                .entry(user_id.clone())
+                .or_insert_with(|| (user.clone(), HashMap::new()));
+            entry.1.insert(channel_type, channel_id);
+
+            if entry.1.len() >= expected_channels {
+                let (user, _) = pending.remove(&user_id).unwrap();
+                connected_users
+                    .write()
+                    .await
+                    .insert(user_id.clone(), user.clone());
+                Some(user)
+            } else {
+                None
+            }
+        };
+
+        if let Some(user) = user_ready {
+            let _ = event_tx.send(ServerInternalEvent::UserReady(user)).await;
+        }
+
+        // Read messages
+        loop {
+            let Some(data) = channel.read().await else {
+                break;
+            };
+
+            for result in buffer.push(&data) {
+                match result {
+                    Ok(msg) => match P::decode(channel_type, &msg) {
+                        Ok(event) => {
+                            let _ = event_tx
+                                .send(ServerInternalEvent::Message {
+                                    sender: user.clone(),
+                                    channel_id,
+                                    channel_type,
+                                    event,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Decode error: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Framing error: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Channel closed - remove from tracking
+        {
+            let mut uc = user_channels.write().await;
+            uc.remove(&channel_id);
+        }
+
+        // Check if user is now disconnected
+        let user_gone = {
+            let mut connected = connected_users.write().await;
+            if connected.remove(&user_id).is_some() {
+                let mut uc = user_channels.write().await;
+                let to_remove: Vec<_> = uc
+                    .iter()
+                    .filter(|(_, (u, _))| u.id() == user_id)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in to_remove {
+                    uc.remove(&id);
+                }
+                Some(user.clone())
+            } else {
+                let mut pending = pending_users.write().await;
+                pending.remove(&user_id);
+                None
+            }
+        };
+
+        if let Some(user) = user_gone {
+            let _ = event_tx.send(ServerInternalEvent::UserGone(user)).await;
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+pub use server::{TypedEvent, TypedContext, with_typed_actor};
+
+// ============================================================================
+// Client-side typed actor (native only)
+// ============================================================================
+
+#[cfg(feature = "client")]
+mod client {
+    use super::*;
+    use crate::framing::{frame_message, MessageBuffer};
+    use std::collections::HashMap;
+    use std::marker::PhantomData;
+    use tokio::sync::mpsc;
+
+    /// Events delivered to a typed client actor.
+    pub enum TypedClientEvent<P: TypedProtocol> {
+        /// All channels connected.
+        Connected,
+        /// Message received.
+        Message(P::Event),
+        /// Disconnected (any channel failed).
+        Disconnected,
+    }
+
+    /// Context for client-side typed actor.
+    pub struct TypedClientContext<P: TypedProtocol> {
+        channels: HashMap<P::Channel, mpsc::Sender<Vec<u8>>>,
+        _phantom: PhantomData<P>,
+    }
+
+    impl<P: TypedProtocol> TypedClientContext<P> {
+        /// Send an event (routed to correct channel by type).
+        pub async fn send(&self, event: &P::Event) -> Result<(), super::EncodeError> {
+            let (channel_type, data) = P::encode(event)?;
+            let framed = frame_message(&data);
+            if let Some(tx) = self.channels.get(&channel_type) {
+                let _ = tx.send(framed).await;
+            }
+            Ok(())
+        }
+    }
+
+    impl<P: TypedProtocol> Clone for TypedClientContext<P> {
+        fn clone(&self) -> Self {
+            Self {
+                channels: self.channels.clone(),
+                _phantom: PhantomData,
+            }
+        }
+    }
+
+    /// Run a typed client actor.
+    pub async fn with_typed_client_actor<P, F, Fut>(
+        conn: multiplayer_kit_client::RoomConnection,
+        actor_fn: F,
+    ) where
+        P: TypedProtocol,
+        F: Fn(TypedClientContext<P>, TypedClientEvent<P>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let channels_to_open = P::all_channels();
+        let mut channel_senders: HashMap<P::Channel, mpsc::Sender<Vec<u8>>> = HashMap::new();
+        let (event_tx, mut event_rx) = mpsc::channel::<TypedClientEvent<P>>(256);
+
+        let mut tasks = Vec::new();
+        for &channel_type in channels_to_open {
+            let channel = match conn.open_channel().await {
+                Ok(ch) => ch,
+                Err(e) => {
+                    tracing::error!("Failed to open channel: {}", e);
+                    let ctx = TypedClientContext {
+                        channels: HashMap::new(),
+                        _phantom: PhantomData,
+                    };
+                    actor_fn(ctx, TypedClientEvent::Disconnected).await;
+                    return;
+                }
+            };
+
+            let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>(256);
+            channel_senders.insert(channel_type, write_tx);
+
+            let tx = event_tx.clone();
+            let channel_id_byte = P::channel_to_id(channel_type);
+
+            tasks.push(tokio::spawn(async move {
+                run_client_channel::<P>(channel, channel_type, channel_id_byte, tx, write_rx).await
+            }));
+        }
+
+        let ctx = TypedClientContext {
+            channels: channel_senders,
+            _phantom: PhantomData,
+        };
+
+        actor_fn(ctx.clone(), TypedClientEvent::Connected).await;
+
+        while let Some(event) = event_rx.recv().await {
+            let is_disconnect = matches!(event, TypedClientEvent::Disconnected);
+            actor_fn(ctx.clone(), event).await;
+            if is_disconnect {
+                break;
+            }
+        }
+
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    async fn run_client_channel<P: TypedProtocol>(
+        channel: multiplayer_kit_client::Channel,
+        channel_type: P::Channel,
+        channel_id_byte: u8,
+        event_tx: mpsc::Sender<TypedClientEvent<P>>,
+        mut write_rx: mpsc::Receiver<Vec<u8>>,
+    ) {
+        // Send channel identification
+        let id_msg = frame_message(&[channel_id_byte]);
+        if channel.write(&id_msg).await.is_err() {
+            let _ = event_tx.send(TypedClientEvent::Disconnected).await;
+            return;
+        }
+
+        let mut buffer = MessageBuffer::new();
+        let mut read_buf = vec![0u8; 64 * 1024];
+
+        loop {
+            tokio::select! {
+                result = channel.read(&mut read_buf) => {
+                    match result {
+                        Ok(n) if n > 0 => {
+                            for result in buffer.push(&read_buf[..n]) {
+                                match result {
+                                    Ok(data) => {
+                                        match P::decode(channel_type, &data) {
+                                            Ok(event) => {
+                                                let _ = event_tx.send(TypedClientEvent::Message(event)).await;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("Decode error: {}", e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Framing error: {}", e);
+                                        let _ = event_tx.send(TypedClientEvent::Disconnected).await;
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            let _ = event_tx.send(TypedClientEvent::Disconnected).await;
+                            return;
+                        }
+                    }
+                }
+                Some(data) = write_rx.recv() => {
+                    if channel.write(&data).await.is_err() {
+                        let _ = event_tx.send(TypedClientEvent::Disconnected).await;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "client")]
+pub use client::{TypedClientEvent, TypedClientContext, with_typed_client_actor};

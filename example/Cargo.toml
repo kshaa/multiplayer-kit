@@ -5,4 +5,5 @@ members = [
     "chat-server",
     "chat-cli",
     "chat-client",
+    "chat-protocol",
 ]

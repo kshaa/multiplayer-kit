@@ -446,19 +446,33 @@ dependencies = [
 name = "chat-client"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "chat-protocol",
  "js-sys",
  "multiplayer-kit-client",
  "multiplayer-kit-helpers",
  "multiplayer-kit-protocol",
  "thiserror 1.0.69",
+ "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "chat-protocol"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "multiplayer-kit-helpers",
+ "multiplayer-kit-protocol",
+ "serde",
 ]
 
 [[package]]
 name = "chat-server"
 version = "0.1.0"
 dependencies = [
+ "chat-protocol",
  "multiplayer-kit-helpers",
  "multiplayer-kit-protocol",
  "multiplayer-kit-server",

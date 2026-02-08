@@ -1,8 +1,10 @@
-//! Chat client library built on multiplayer-kit-helpers.
+//! Chat client library built on multiplayer-kit typed actors.
 //!
-//! Wraps `RoomConnection` and `Channel` with automatic message framing for text.
+//! Provides both:
+//! - Simple imperative API for CLI (`ChatClient::connect`, `send_text`, `receive_text`)
+//! - Typed actor API for more control (`with_typed_client_actor`)
 //!
-//! # Example
+//! # Example (Simple)
 //!
 //! ```ignore
 //! use chat_client::ChatClient;
@@ -15,60 +17,189 @@
 //!     println!("{}", msg);
 //! }
 //! ```
+//!
+//! # Example (Typed Actor)
+//!
+//! ```ignore
+//! use chat_client::{run_chat_client, ChatProtocol, ChatEvent};
+//! use multiplayer_kit_helpers::{TypedClientContext, TypedClientEvent};
+//!
+//! run_chat_client(conn, my_handler).await;
+//!
+//! async fn my_handler(ctx: TypedClientContext<ChatProtocol>, event: TypedClientEvent<ChatProtocol>) {
+//!     match event {
+//!         TypedClientEvent::Message(ChatEvent::Chat(msg)) => { ... }
+//!         _ => {}
+//!     }
+//! }
+//! ```
 
-pub use multiplayer_kit_helpers::{MessageChannel, MessageChannelError};
+pub use chat_protocol::{ChatChannel, ChatEvent, ChatMessage, ChatProtocol, ChatUser};
 pub use multiplayer_kit_client::{ApiClient, ClientError, RoomConnection};
 pub use multiplayer_kit_protocol::RoomId;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use multiplayer_kit_helpers::{
+    with_typed_client_actor, TypedClientContext, TypedClientEvent, TypedProtocol,
+};
+
+use chat_protocol::{DecodeError, EncodeError};
+use multiplayer_kit_helpers::{frame_message, MessageBuffer};
 
 /// Chat client errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ChatError {
-    #[error("channel error: {0}")]
-    Channel(#[from] MessageChannelError),
-    #[error("invalid UTF-8: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("client error: {0}")]
+    Client(#[from] ClientError),
+    #[error("encode error: {0}")]
+    Encode(#[from] EncodeError),
+    #[error("decode error: {0}")]
+    Decode(#[from] DecodeError),
+    #[error("channel closed")]
+    ChannelClosed,
+    #[error("not connected")]
+    NotConnected,
 }
 
-/// A chat client with automatic message framing.
-pub struct ChatClient {
-    _conn: RoomConnection,
-    channel: MessageChannel,
-}
+// Native-only ChatClient implementation
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::*;
+    use tokio::sync::mpsc;
 
-impl ChatClient {
-    /// Connect to a room and open a framed message channel.
-    pub async fn connect(url: &str, ticket: &str, room_id: RoomId) -> Result<Self, ClientError> {
-        let conn = RoomConnection::connect(url, ticket, room_id).await?;
-        let channel = conn.open_channel().await?;
-        Ok(Self {
-            _conn: conn,
-            channel: MessageChannel::new(channel),
-        })
+    /// Simple chat client with text-based API.
+    ///
+    /// Uses the typed protocol internally but exposes a simple send/receive text interface.
+    pub struct ChatClient {
+        /// Username for this client.
+        username: String,
+        /// Send messages to the writer task.
+        write_tx: mpsc::Sender<ChatMessage>,
+        /// Receive messages from the reader task.
+        read_rx: mpsc::Receiver<ChatMessage>,
     }
 
-    /// Send a text message (auto-framed).
-    pub async fn send_text(&self, msg: &str) -> Result<(), ClientError> {
-        self.channel.send(msg.as_bytes()).await
-    }
+    impl ChatClient {
+        /// Connect to a room.
+        pub async fn connect(
+            url: &str,
+            ticket: &str,
+            room_id: RoomId,
+            username: String,
+        ) -> Result<Self, ChatError> {
+            let conn = RoomConnection::connect(url, ticket, room_id).await?;
+            Self::from_connection(conn, username).await
+        }
 
-    /// Receive the next complete text message.
-    pub async fn receive_text(&mut self) -> Result<Option<String>, ChatError> {
-        match self.channel.recv().await? {
-            Some(data) => Ok(Some(String::from_utf8(data)?)),
-            None => Ok(None),
+        /// Create from an existing connection.
+        pub async fn from_connection(
+            conn: RoomConnection,
+            username: String,
+        ) -> Result<Self, ChatError> {
+            let channel = conn.open_channel().await?;
+            let channel = std::sync::Arc::new(channel);
+
+            // Create channels for communication with the I/O tasks
+            let (write_tx, mut write_rx) = mpsc::channel::<ChatMessage>(256);
+            let (read_tx, read_rx) = mpsc::channel::<ChatMessage>(256);
+
+            // Send channel identification (Chat channel = 0)
+            let channel_id_msg = frame_message(&[ChatProtocol::channel_to_id(ChatChannel::Chat)]);
+            channel.write(&channel_id_msg).await?;
+
+            // Spawn writer task
+            let write_channel = std::sync::Arc::clone(&channel);
+            tokio::spawn(async move {
+                while let Some(msg) = write_rx.recv().await {
+                    let data = match bincode::serialize(&msg) {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    let framed = frame_message(&data);
+                    if write_channel.write(&framed).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // Spawn reader task
+            let read_channel = std::sync::Arc::clone(&channel);
+            tokio::spawn(async move {
+                let mut buffer = MessageBuffer::new();
+                let mut buf = vec![0u8; 64 * 1024];
+
+                loop {
+                    let n = match read_channel.read(&mut buf).await {
+                        Ok(n) if n > 0 => n,
+                        _ => break,
+                    };
+
+                    for result in buffer.push(&buf[..n]) {
+                        if let Ok(data) = result {
+                            if let Ok(msg) = bincode::deserialize::<ChatMessage>(&data) {
+                                if read_tx.send(msg).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            Ok(Self {
+                username,
+                write_tx,
+                read_rx,
+            })
+        }
+
+        /// Send a text message.
+        pub async fn send_text(&self, content: &str) -> Result<(), ChatError> {
+            let msg = ChatMessage::Text {
+                username: self.username.clone(),
+                content: content.to_string(),
+            };
+            self.write_tx
+                .send(msg)
+                .await
+                .map_err(|_| ChatError::ChannelClosed)
+        }
+
+        /// Receive the next message.
+        /// Returns the formatted message string, or None if disconnected.
+        pub async fn receive_text(&mut self) -> Result<Option<String>, ChatError> {
+            match self.read_rx.recv().await {
+                Some(ChatMessage::Text { username, content }) => {
+                    Ok(Some(format!("{}: {}", username, content)))
+                }
+                Some(ChatMessage::System(msg)) => Ok(Some(msg)),
+                None => Ok(None),
+            }
+        }
+
+        /// Get the username.
+        pub fn username(&self) -> &str {
+            &self.username
         }
     }
 
-    /// Get a reference to the underlying MessageChannel.
-    pub fn channel(&self) -> &MessageChannel {
-        &self.channel
-    }
-
-    /// Get a mutable reference to the underlying MessageChannel.
-    pub fn channel_mut(&mut self) -> &mut MessageChannel {
-        &mut self.channel
+    /// Run the typed chat client actor.
+    ///
+    /// This is the lower-level API that gives full control over events.
+    pub async fn run_chat_client<F, Fut>(conn: RoomConnection, actor_fn: F)
+    where
+        F: Fn(TypedClientContext<ChatProtocol>, TypedClientEvent<ChatProtocol>) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        with_typed_client_actor::<ChatProtocol, F, Fut>(conn, actor_fn).await;
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{ChatClient, run_chat_client};
 
 // ============================================================================
 // WASM exports
@@ -77,9 +208,10 @@ impl ChatClient {
 #[cfg(feature = "wasm")]
 mod wasm {
     use super::*;
-    use wasm_bindgen::prelude::*;
+    use chat_protocol::TypedProtocol;
     use std::cell::RefCell;
-    use multiplayer_kit_helpers::{frame_message, MessageBuffer};
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsValue;
 
     /// Re-export ApiClient from the core client library for convenience.
     pub use multiplayer_kit_client::wasm_exports::JsApiClient;
@@ -87,30 +219,27 @@ mod wasm {
     /// Check if WebTransport is supported in the current browser.
     fn is_webtransport_supported() -> bool {
         js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("WebTransport"))
-            .map(|v| !v.is_undefined())
+            .map(|v: JsValue| !v.is_undefined())
             .unwrap_or(false)
     }
 
-    /// Chat client for JavaScript with automatic message framing.
-    /// 
-    /// Uses separate state for send (channel only) and receive (buffer) to allow
-    /// concurrent send/receive without RefCell conflicts.
+    /// Chat client for JavaScript with typed protocol.
     #[wasm_bindgen]
     pub struct JsChatClient {
-        conn: RoomConnection,
+        username: String,
         channel: multiplayer_kit_client::Channel,
         recv_state: RefCell<RecvState>,
     }
 
     struct RecvState {
         buffer: MessageBuffer,
-        pending: Vec<Vec<u8>>,
+        pending: Vec<ChatMessage>,
     }
 
     impl JsChatClient {
-        fn new(conn: RoomConnection, channel: multiplayer_kit_client::Channel) -> Self {
+        fn new(username: String, channel: multiplayer_kit_client::Channel) -> Self {
             Self {
-                conn,
+                username,
                 channel,
                 recv_state: RefCell::new(RecvState {
                     buffer: MessageBuffer::new(),
@@ -122,44 +251,7 @@ mod wasm {
 
     #[wasm_bindgen]
     impl JsChatClient {
-        /// Connect with options (single URL, explicit transport choice).
-        /// - cert_hash: Base64 SHA-256 hash for self-signed certs (WebTransport only)
-        /// - use_websocket: If true, use WebSocket; if false, use WebTransport
-        #[wasm_bindgen(js_name = connectWithOptions)]
-        pub async fn connect_with_options(
-            url: &str,
-            ticket: &str,
-            room_id: u32,
-            cert_hash: Option<String>,
-            use_websocket: bool,
-        ) -> Result<JsChatClient, JsError> {
-            let transport = if use_websocket {
-                multiplayer_kit_client::Transport::WebSocket
-            } else {
-                multiplayer_kit_client::Transport::WebTransport
-            };
-
-            let config = multiplayer_kit_client::ConnectionConfig { transport, cert_hash };
-
-            let conn = RoomConnection::connect_with_config(
-                url,
-                ticket,
-                RoomId(room_id as u64),
-                config,
-            )
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
-
-            let channel = conn
-                .open_channel()
-                .await
-                .map_err(|e| JsError::new(&e.to_string()))?;
-
-            Ok(JsChatClient::new(conn, channel))
-        }
-
         /// Connect with auto-detection.
-        /// Provide both URLs - uses WebTransport if supported, otherwise WebSocket.
         #[wasm_bindgen(js_name = connectAuto)]
         pub async fn connect_auto(
             webtransport_url: &str,
@@ -167,9 +259,13 @@ mod wasm {
             ticket: &str,
             room_id: u32,
             cert_hash: Option<String>,
+            username: String,
         ) -> Result<JsChatClient, JsError> {
             let (url, transport) = if is_webtransport_supported() {
-                (webtransport_url, multiplayer_kit_client::Transport::WebTransport)
+                (
+                    webtransport_url,
+                    multiplayer_kit_client::Transport::WebTransport,
+                )
             } else {
                 (websocket_url, multiplayer_kit_client::Transport::WebSocket)
             };
@@ -190,72 +286,92 @@ mod wasm {
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))?;
 
-            Ok(JsChatClient::new(conn, channel))
+            // Send channel identification
+            let channel_id_msg =
+                frame_message(&[ChatProtocol::channel_to_id(ChatChannel::Chat)]);
+            channel
+                .write(&channel_id_msg)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
+
+            Ok(JsChatClient::new(username, channel))
         }
 
-        /// Send a text message (auto-framed).
-        /// Does not borrow recv_state, so safe to call while receive is pending.
+        /// Send a text message.
         #[wasm_bindgen(js_name = sendText)]
-        pub async fn send_text(&self, msg: &str) -> Result<(), JsError> {
-            let framed = frame_message(msg.as_bytes());
+        pub async fn send_text(&self, content: &str) -> Result<(), JsError> {
+            let msg = ChatMessage::Text {
+                username: self.username.clone(),
+                content: content.to_string(),
+            };
+            let data = bincode::serialize(&msg)
+                .map_err(|e| JsError::new(&format!("Serialize error: {}", e)))?;
+            let framed = frame_message(&data);
             self.channel
                 .write(&framed)
                 .await
                 .map_err(|e| JsError::new(&e.to_string()))
         }
 
-        /// Receive the next complete text message.
-        /// Returns null if the connection is closed.
+        /// Receive the next message as a formatted string.
+        /// Returns null if disconnected.
         #[wasm_bindgen(js_name = receiveText)]
         pub async fn receive_text(&self) -> Result<Option<String>, JsError> {
-            // Check for pending messages first (quick borrow)
+            // Check pending first
             {
                 let mut state = self.recv_state.borrow_mut();
                 if let Some(msg) = state.pending.pop() {
-                    return String::from_utf8(msg)
-                        .map(Some)
-                        .map_err(|e| JsError::new(&format!("Invalid UTF-8: {}", e)));
+                    return Ok(Some(format_message(&msg)));
                 }
             }
 
-            // Read more data - loop until we get a complete message
+            // Read more data
             loop {
-                // Read from channel (no borrow held during await)
                 let mut temp_buf = vec![0u8; 64 * 1024];
-                let n = self.channel
+                let n = self
+                    .channel
                     .read(&mut temp_buf)
                     .await
                     .map_err(|e| JsError::new(&e.to_string()))?;
 
                 if n == 0 {
-                    return Ok(None); // Channel closed
+                    return Ok(None);
                 }
 
-                // Process the data (quick borrow)
                 {
                     let mut state = self.recv_state.borrow_mut();
                     let results: Vec<_> = state.buffer.push(&temp_buf[..n]).collect();
                     for result in results {
                         match result {
-                            Ok(msg) => state.pending.push(msg),
-                            Err(e) => return Err(JsError::new(&format!("Framing error: {}", e))),
+                            Ok(data) => {
+                                if let Ok(msg) = bincode::deserialize::<ChatMessage>(&data) {
+                                    state.pending.push(msg);
+                                }
+                            }
+                            Err(e) => {
+                                return Err(JsError::new(&format!("Framing error: {}", e)))
+                            }
                         }
                     }
 
                     if let Some(msg) = state.pending.pop() {
-                        return String::from_utf8(msg)
-                            .map(Some)
-                            .map_err(|e| JsError::new(&format!("Invalid UTF-8: {}", e)));
+                        return Ok(Some(format_message(&msg)));
                     }
                 }
-                // Loop to read more if no complete message yet
             }
         }
 
-        /// Check if connected.
-        #[wasm_bindgen(js_name = isConnected)]
-        pub fn is_connected(&self) -> bool {
-            self.conn.is_connected()
+        /// Get the username.
+        #[wasm_bindgen(getter)]
+        pub fn username(&self) -> String {
+            self.username.clone()
+        }
+    }
+
+    fn format_message(msg: &ChatMessage) -> String {
+        match msg {
+            ChatMessage::Text { username, content } => format!("{}: {}", username, content),
+            ChatMessage::System(s) => s.clone(),
         }
     }
 }

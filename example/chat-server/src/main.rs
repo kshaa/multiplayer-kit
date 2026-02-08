@@ -1,26 +1,13 @@
-//! Simple chat server using multiplayer-kit.
+//! Simple chat server using multiplayer-kit with typed actors.
 //!
 //! Run with: cargo run --bin chat-server
 
-use multiplayer_kit_helpers::{with_actor, with_framing, MessageContext, MessageEvent, Outgoing, Route};
-use multiplayer_kit_protocol::{RejectReason, UserContext};
+use chat_protocol::{ChatChannel, ChatEvent, ChatMessage, ChatProtocol, ChatUser};
+use multiplayer_kit_helpers::{with_typed_actor, TypedContext, TypedEvent};
+use multiplayer_kit_protocol::RejectReason;
 use multiplayer_kit_server::{AuthRequest, Server};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-/// User context - just a username and ID.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChatUser {
-    id: u64,
-    username: String,
-}
-
-impl UserContext for ChatUser {
-    type Id = u64;
-    fn id(&self) -> u64 {
-        self.id
-    }
-}
 
 static NEXT_USER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -72,8 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("Issued ticket for user: {} (id={})", user.username, user.id);
             Ok(user)
         })
-        // Room handler with actor wrapper and message framing via helpers
-        .room_handler(with_actor(with_framing(chat_room_actor)))
+        // Typed actor - handles events with automatic framing and serialization
+        .room_handler(with_typed_actor::<ChatUser, ChatProtocol, _, _>(chat_actor))
         .build()
         .expect("Failed to build server");
 
@@ -82,52 +69,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The chat room actor - receives complete messages, no manual framing needed.
-async fn chat_room_actor(mut ctx: MessageContext<ChatUser>) {
+/// Chat room actor - receives typed events, one at a time.
+async fn chat_actor(
+    ctx: TypedContext<ChatUser, ChatProtocol>,
+    event: TypedEvent<ChatUser, ChatProtocol>,
+) {
     let room_id = ctx.room_id();
-    tracing::info!("[Room {:?}] Actor started", room_id);
 
-    loop {
-        match ctx.recv().await {
-            Some(MessageEvent::UserJoined(user)) => {
-                tracing::info!("[Room {:?}] {} joined", room_id, user.username);
-                let msg = format!("*** {} joined the chat ***", user.username);
-                ctx.send(Outgoing::new(msg.into_bytes(), Route::All)).await;
-            }
-            Some(MessageEvent::UserLeft(user)) => {
-                tracing::info!("[Room {:?}] {} left", room_id, user.username);
-                let msg = format!("*** {} left the chat ***", user.username);
-                ctx.send(Outgoing::new(msg.into_bytes(), Route::All)).await;
-            }
-            Some(MessageEvent::ChannelOpened { user, channel }) => {
-                tracing::debug!("[Room {:?}] Channel {:?} opened by {}", room_id, channel, user.username);
-            }
-            Some(MessageEvent::ChannelClosed { user, channel }) => {
-                tracing::debug!("[Room {:?}] Channel {:?} closed by {}", room_id, channel, user.username);
-            }
-            Some(MessageEvent::Message { sender, channel, data }) => {
-                let text = match std::str::from_utf8(&data) {
-                    Ok(s) if !s.is_empty() && s.len() <= 4096 => s,
-                    _ => {
-                        tracing::warn!("[Room {:?}] Invalid message from {}", room_id, sender.username);
-                        continue;
-                    }
-                };
-                tracing::info!("[Room {:?}] {}", room_id, text);
-                
-                // Forward to all OTHER channels (sender has local echo)
-                ctx.send(Outgoing::new(data, Route::AllExcept(channel))).await;
-            }
-            Some(MessageEvent::Shutdown) => {
-                tracing::info!("[Room {:?}] Shutting down", room_id);
-                break;
-            }
-            None => {
-                tracing::info!("[Room {:?}] Event channel closed", room_id);
-                break;
-            }
+    match event {
+        TypedEvent::UserConnected(user) => {
+            tracing::info!("[Room {:?}] {} connected", room_id, user.username);
+
+            // Broadcast join message
+            let msg = ChatEvent::Chat(ChatMessage::System(format!(
+                "*** {} joined the chat ***",
+                user.username
+            )));
+            ctx.broadcast(&msg).await;
+        }
+
+        TypedEvent::UserDisconnected(user) => {
+            tracing::info!("[Room {:?}] {} disconnected", room_id, user.username);
+
+            // Broadcast leave message
+            let msg = ChatEvent::Chat(ChatMessage::System(format!(
+                "*** {} left the chat ***",
+                user.username
+            )));
+            ctx.broadcast(&msg).await;
+        }
+
+        TypedEvent::Message {
+            sender,
+            channel: ChatChannel::Chat,
+            event: ChatEvent::Chat(ChatMessage::Text { content, .. }),
+        } => {
+            tracing::info!("[Room {:?}] {}: {}", room_id, sender.username, content);
+
+            // Broadcast to all (include sender - they'll see their username)
+            let msg = ChatEvent::Chat(ChatMessage::Text {
+                username: sender.username,
+                content,
+            });
+            ctx.broadcast(&msg).await;
+        }
+
+        TypedEvent::Message { .. } => {
+            // Ignore other message types (system messages from clients, etc.)
+        }
+
+        TypedEvent::Shutdown => {
+            tracing::info!("[Room {:?}] Shutting down", room_id);
         }
     }
-
-    tracing::info!("[Room {:?}] Actor stopped", room_id);
 }

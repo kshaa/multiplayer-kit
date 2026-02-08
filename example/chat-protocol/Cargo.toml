@@ -1,0 +1,10 @@
+[package]
+name = "chat-protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+multiplayer-kit-helpers = { path = "../../helpers", default-features = false }
+multiplayer-kit-protocol = { path = "../../protocol" }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"

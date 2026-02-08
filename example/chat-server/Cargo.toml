@@ -11,6 +11,7 @@ path = "src/main.rs"
 multiplayer-kit-server = { path = "../../server" }
 multiplayer-kit-protocol = { path = "../../protocol" }
 multiplayer-kit-helpers = { path = "../../helpers", default-features = false, features = ["server"] }
+chat-protocol = { path = "../chat-protocol" }
 
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

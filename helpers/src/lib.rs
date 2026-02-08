@@ -1,43 +1,9 @@
 //! Helper utilities for multiplayer-kit.
 //!
-//! Provides optional message framing on top of raw byte streams.
-//!
-//! # Example (Client)
-//!
-//! ```ignore
-//! use multiplayer_kit_helpers::MessageChannel;
-//!
-//! let channel = room_conn.open_channel().await?;
-//! let mut msg_channel = MessageChannel::new(channel);
-//!
-//! // Send a message (automatically framed)
-//! msg_channel.send(b"hello world").await?;
-//!
-//! // Receive a complete message
-//! if let Some(msg) = msg_channel.recv().await? {
-//!     println!("got: {:?}", msg);
-//! }
-//! ```
-//!
-//! # Example (Server Actor)
-//!
-//! ```ignore
-//! use multiplayer_kit_helpers::{with_actor, with_framing, RoomContext, MessageContext, MessageEvent, Outgoing, Route};
-//!
-//! Server::builder()
-//!     .room_handler(with_actor(with_framing(|mut ctx: MessageContext<MyUser>| async move {
-//!         while let Some(event) = ctx.recv().await {
-//!             match event {
-//!                 MessageEvent::Message { sender, channel, data } => {
-//!                     // `data` is a complete, unframed message
-//!                     ctx.send(Outgoing::new(data, Route::AllExcept(channel))).await;
-//!                 }
-//!                 _ => {}
-//!             }
-//!         }
-//!     })))
-//!     .build()
-//! ```
+//! Provides optional abstractions on top of the raw channel API:
+//! - Message framing (length-prefixed)
+//! - Typed channels with automatic serialization
+//! - Actor pattern helpers
 
 mod framing;
 
@@ -49,6 +15,7 @@ mod channel;
 #[cfg(any(feature = "client", feature = "wasm"))]
 pub use channel::{MessageChannel, MessageChannelError};
 
+// Old actor module (kept for backwards compat)
 #[cfg(feature = "server")]
 mod actor;
 
@@ -59,3 +26,19 @@ pub use actor::{
     MessageContext, MessageEvent,
     Outgoing, Route,
 };
+
+// Typed module - available for server and client (wasm or native)
+#[cfg(any(feature = "server", feature = "client", feature = "wasm"))]
+mod typed;
+
+// Common types always available when typed module is
+#[cfg(any(feature = "server", feature = "client", feature = "wasm"))]
+pub use typed::{TypedProtocol, DecodeError, EncodeError};
+
+// Server-specific typed exports
+#[cfg(feature = "server")]
+pub use typed::{TypedEvent, TypedContext, with_typed_actor};
+
+// Client-specific typed exports (native)
+#[cfg(feature = "client")]
+pub use typed::{TypedClientEvent, TypedClientContext, with_typed_client_actor};

@@ -62,10 +62,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Chat client state
     let mut client: Option<Arc<Mutex<ChatClient>>> = None;
     let mut in_room = false;
-    
+
     // Channel for stdin lines
     let (line_tx, mut line_rx) = mpsc::channel::<String>(10);
-    
+
     // Spawn blocking stdin reader
     std::thread::spawn(move || {
         let stdin = io::stdin();
@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-    
+
     // Channel for chat events
     let (chat_event_tx, mut chat_event_rx) = mpsc::channel::<ChatEvent>(256);
 
@@ -112,11 +112,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 io::stdout().flush()?;
             }
-            
+
             // Handle user input
             Some(line) = line_rx.recv() => {
                 let input = line.trim();
-                
+
                 if input.is_empty() {
                     if in_room {
                         print!("[room] > ");
@@ -191,14 +191,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
 
                                 println!("Joining room {}...", room_id);
-                                match ChatClient::connect(SERVER_QUIC, &ticket, RoomId(room_id)).await {
+                                match ChatClient::connect(
+                                    SERVER_QUIC,
+                                    &ticket,
+                                    RoomId(room_id),
+                                    username.clone(),
+                                ).await {
                                     Ok(chat_client) => {
                                         println!("Joined room {}! Start chatting.", room_id);
-                                        
+
                                         let chat_client = Arc::new(Mutex::new(chat_client));
                                         client = Some(Arc::clone(&chat_client));
                                         in_room = true;
-                                        
+
                                         // Spawn read task
                                         let event_tx = chat_event_tx.clone();
                                         tokio::spawn(async move {
@@ -207,7 +212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     let mut c = chat_client.lock().await;
                                                     c.receive_text().await
                                                 };
-                                                
+
                                                 match result {
                                                     Ok(Some(msg)) => {
                                                         if event_tx.send(ChatEvent::Message(msg)).await.is_err() {
@@ -250,22 +255,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     // Send chat message
                     if let Some(ref c) = client {
-                        let message = format!("{}: {}", username, input);
-                        // Local echo
-                        println!("{}", message);
-                        
                         let c = c.lock().await;
-                        if let Err(e) = c.send_text(&message).await {
+                        if let Err(e) = c.send_text(input).await {
                             println!("Failed to send: {}", e);
                             drop(c);
                             client = None;
                             in_room = false;
                         }
+                        // No local echo - server broadcasts back to us
                     } else {
                         println!("Not in a room. Use /join <id> first.");
                     }
                 }
-                
+
                 // Print prompt
                 if in_room {
                     print!("[room] > ");
