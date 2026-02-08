@@ -15,15 +15,28 @@ Generic multiplayer server and client library for real-time games. WebTransport 
 
 **Server** is a relay with configurable room handlers. It does not interpret game messages.
 
-**REST endpoints:**
-- `POST /ticket` - get JWT (custom auth logic)
-- `POST /rooms` - create room
-- `GET /rooms` - list rooms
-- `DELETE /rooms/{id}` - delete room
+**REST endpoints** (default `http://host:8080`):
 
-**Transport endpoints:**
-- WebTransport (QUIC) - high performance, multi-stream
-- WebSocket - fallback for Safari/older browsers
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/ticket` | Get JWT ticket (custom auth logic) |
+| `POST` | `/rooms` | Create room with config body |
+| `GET` | `/rooms` | List rooms |
+| `DELETE` | `/rooms/{id}` | Delete room (creator only) |
+| `POST` | `/quickplay` | Auto-join or create room |
+| `GET` | `/cert-hash` | Get WebTransport cert hash (for dev) |
+
+**Transport endpoints (real-time):**
+
+| Transport | Default | Path | Description |
+|-----------|---------|------|-------------|
+| WebTransport | `https://host:4433` | `/room/{id}?ticket=...` | QUIC-based, multi-stream |
+| WebTransport | `https://host:4433` | `/lobby` | Live room list updates |
+| WebSocket | `ws://host:8080` | `/ws/room/{id}?ticket=...` | Fallback for Safari |
+
+**Auth flow:** Both transports authenticate via query param. Server validates ticket before accepting. Each bi-stream (WebTransport) or connection (WebSocket) becomes a channel.
+
+WebTransport preferred (lower latency, multiplexed streams). WebSocket fallback when unavailable.
 
 ## Crates
 

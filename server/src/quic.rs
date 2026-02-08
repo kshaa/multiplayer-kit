@@ -1,9 +1,7 @@
 //! QUIC/WebTransport handlers for lobby and room connections.
 //!
-//! Room connections use persistent bidirectional streams:
-//! - First bi-stream: auth (send ticket, receive "joined")
-//! - Subsequent bi-streams: channels (each stays open for the session)
-//!   Communication is bidirectional on the same stream.
+//! Room connections authenticate via URL query param (like WebSocket).
+//! Each bi-stream opened after connection becomes a channel.
 
 use crate::lobby::Lobby;
 use crate::room::RoomManager;
@@ -31,14 +29,36 @@ pub async fn handle_session<T: UserContext, C: RoomConfig>(
 
     tracing::info!("Incoming session for path: {}", path);
 
-    let connection = session_request.accept().await?;
-
-    if path == "/lobby" {
+    if path == "/lobby" || path.starts_with("/lobby?") {
+        let connection = session_request.accept().await?;
         handle_lobby_connection(connection, state).await
     } else if path.starts_with("/room/") {
-        let room_id_str = path.strip_prefix("/room/").unwrap_or("0");
+        // Parse: /room/{id}?ticket=...
+        let (room_part, query) = path.split_once('?').unwrap_or((&path, ""));
+        let room_id_str = room_part.strip_prefix("/room/").unwrap_or("0");
         let room_id = room_id_str.parse::<u64>().unwrap_or(0);
-        handle_room_connection(connection, RoomId(room_id), state).await
+
+        // Extract ticket from query params
+        let ticket = query
+            .split('&')
+            .find_map(|param| param.strip_prefix("ticket="))
+            .ok_or("Missing ticket query parameter")?;
+
+        // Validate ticket before accepting connection
+        let user: T = state.ticket_manager.validate(ticket).map_err(|e| {
+            tracing::warn!("Invalid ticket for room: {:?}", e);
+            e
+        })?;
+
+        // Check room exists
+        if !state.room_manager.room_exists(RoomId(room_id)) {
+            return Err("Room not found".into());
+        }
+
+        tracing::info!("Room client authenticated, joining room {:?}", room_id);
+
+        let connection = session_request.accept().await?;
+        handle_room_connection(connection, RoomId(room_id), user, state).await
     } else {
         tracing::warn!("Unknown path: {}", path);
         Ok(())
@@ -98,36 +118,16 @@ async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
 
 /// Handle a room WebTransport connection.
 /// 
-/// Protocol:
-/// 1. Client opens first bi-stream, sends ticket
-/// 2. Server validates, sends "joined"
-/// 3. Client opens additional bi-streams as "channels" - each is bidirectional
-/// 4. Client sends on bi-stream -> server reads -> forwards to room handler
-/// 5. Room handler sends response -> routed back on SAME bi-stream
+/// Protocol (simplified - auth in URL):
+/// 1. Client connects with ticket in query param
+/// 2. Server validates before accepting
+/// 3. Each bi-stream client opens becomes a channel
 async fn handle_room_connection<T: UserContext, C: RoomConfig>(
     connection: Connection,
     room_id: RoomId,
+    user: T,
     state: Arc<QuicState<T, C>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Check room exists
-    if !state.room_manager.room_exists(room_id) {
-        return Err("Room not found".into());
-    }
-
-    // Authenticate via first bidirectional stream
-    let (mut auth_send, auth_recv) = connection.accept_bi().await?;
-    let ticket = read_string(auth_recv).await?;
-
-    let user: T = state.ticket_manager.validate(&ticket).map_err(|e| {
-        tracing::warn!("Invalid ticket for room: {:?}", e);
-        e
-    })?;
-
-    tracing::info!("Room client authenticated, joining room {:?}", room_id);
-
-    // Send join confirmation on auth stream
-    auth_send.write_all(b"joined").await?;
-
     // Track active channel tasks
     let mut channel_tasks: Vec<(ChannelId, tokio::task::JoinHandle<()>)> = Vec::new();
 

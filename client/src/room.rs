@@ -103,37 +103,11 @@ mod native {
                 ClientError::Connection(ConnectionError::Transport(e.to_string()))
             })?;
 
-            let room_url = format!("{}/room/{}", url, room_id.0);
+            // Auth via URL query param (like WebSocket)
+            let room_url = format!("{}/room/{}?ticket={}", url, room_id.0, ticket);
             let connection = endpoint.connect(&room_url).await.map_err(|e| {
                 ClientError::Connection(ConnectionError::Transport(e.to_string()))
             })?;
-
-            // Auth: open first bi-stream, send ticket, get confirmation
-            let (mut send, mut recv) = connection
-                .open_bi()
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-
-            send.write_all(ticket.as_bytes()).await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(e.to_string()))
-            })?;
-            send.finish().await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(e.to_string()))
-            })?;
-
-            // Read confirmation
-            let mut confirm = vec![0u8; 64];
-            let n = recv.read(&mut confirm).await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(e.to_string()))
-            })?;
-
-            if n.is_none() || n == Some(0) {
-                return Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    "No join confirmation".to_string(),
-                )));
-            }
 
             Ok(Self {
                 transport: Transport::WebTransport,
@@ -468,7 +442,8 @@ mod wasm {
             room_id: RoomId,
             cert_hash: Option<String>,
         ) -> Result<Self, ClientError> {
-            let room_url = format!("{}/room/{}", url, room_id.0);
+            // Auth via URL query param (like WebSocket)
+            let room_url = format!("{}/room/{}?ticket={}", url, room_id.0, ticket);
 
             let transport = if let Some(hash_b64) = cert_hash {
                 let hash_bytes = base64_decode(&hash_b64).map_err(|e| {
@@ -497,49 +472,6 @@ mod wasm {
             transport.ready().await.map_err(|e| {
                 ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
             })?;
-
-            // Auth stream
-            let bi_stream = transport.create_bidirectional_stream().await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-            })?;
-
-            let writable: web_sys::WritableStream = bi_stream.writable().unchecked_into();
-            let writer = writable.get_writer().map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-            })?;
-
-            let ticket_bytes = js_sys::Uint8Array::from(ticket.as_bytes());
-            JsFuture::from(writer.write_with_chunk(&ticket_bytes))
-                .await
-                .map_err(|e| {
-                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-                })?;
-
-            JsFuture::from(writer.close()).await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-            })?;
-
-            // Read confirmation
-            let readable: web_sys::ReadableStream = bi_stream.readable().unchecked_into();
-            let reader = readable
-                .get_reader()
-                .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
-
-            let result = JsFuture::from(reader.read()).await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-            })?;
-
-            let result_obj: js_sys::Object = result.unchecked_into();
-            let done = js_sys::Reflect::get(&result_obj, &"done".into())
-                .unwrap_or(JsValue::TRUE)
-                .as_bool()
-                .unwrap_or(true);
-
-            if done {
-                return Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    "No join confirmation".to_string(),
-                )));
-            }
 
             Ok(Self {
                 transport: Transport::WebTransport,
