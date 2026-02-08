@@ -3,14 +3,18 @@ use std::hash::Hash;
 
 /// Trait that library users implement for their user data.
 /// This data is embedded in JWTs and available during message validation.
-pub trait UserContext: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static {
+pub trait UserContext:
+    Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static
+{
     type Id: Eq + Hash + Clone + Send + Sync + 'static + std::fmt::Debug;
     fn id(&self) -> Self::Id;
 }
 
 /// Trait for room configuration.
 /// Games implement this to define what config is needed when creating a room.
-pub trait RoomConfig: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static {
+pub trait RoomConfig:
+    Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static
+{
     /// Room name (required, displayed in lobby).
     fn name(&self) -> &str;
 

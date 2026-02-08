@@ -84,7 +84,7 @@ pub trait TypedProtocol: Send + Sync + 'static {
 #[cfg(feature = "server")]
 mod server {
     use super::*;
-    use crate::framing::{frame_message, MessageBuffer};
+    use crate::framing::{MessageBuffer, frame_message};
     use multiplayer_kit_protocol::{ChannelId, RoomId, UserContext};
     use std::collections::HashMap;
     use std::marker::PhantomData;
@@ -188,7 +188,7 @@ mod server {
     }
 
     /// Wrap a typed actor function for the server.
-    /// 
+    ///
     /// The actor function receives:
     /// - `TypedContext<T, P>` for sending messages
     /// - `TypedEvent<T, P>` the current event
@@ -196,10 +196,10 @@ mod server {
     pub fn with_typed_actor<T, P, C, F, Fut>(
         actor_fn: F,
     ) -> impl Fn(multiplayer_kit_server::Room<T>, C) -> Pin<Box<dyn Future<Output = ()> + Send>>
-           + Send
-           + Sync
-           + Clone
-           + 'static
+    + Send
+    + Sync
+    + Clone
+    + 'static
     where
         T: UserContext,
         P: TypedProtocol,
@@ -310,7 +310,9 @@ mod server {
         channel_id: ChannelId,
         event_tx: mpsc::Sender<ServerInternalEvent<T, P>>,
         user_channels: Arc<tokio::sync::RwLock<HashMap<ChannelId, (T, P::Channel)>>>,
-        pending_users: Arc<tokio::sync::RwLock<HashMap<T::Id, (T, HashMap<P::Channel, ChannelId>)>>>,
+        pending_users: Arc<
+            tokio::sync::RwLock<HashMap<T::Id, (T, HashMap<P::Channel, ChannelId>)>>,
+        >,
         connected_users: Arc<tokio::sync::RwLock<HashMap<T::Id, T>>>,
         expected_channels: usize,
     ) {
@@ -441,7 +443,7 @@ mod server {
 }
 
 #[cfg(feature = "server")]
-pub use server::{TypedEvent, TypedContext, with_typed_actor};
+pub use server::{TypedContext, TypedEvent, with_typed_actor};
 
 // ============================================================================
 // Client-side typed actor (native only)
@@ -450,7 +452,7 @@ pub use server::{TypedEvent, TypedContext, with_typed_actor};
 #[cfg(feature = "client")]
 mod client {
     use super::*;
-    use crate::framing::{frame_message, MessageBuffer};
+    use crate::framing::{MessageBuffer, frame_message};
     use std::collections::HashMap;
     use std::marker::PhantomData;
     use tokio::sync::mpsc;
@@ -611,7 +613,7 @@ mod client {
 }
 
 #[cfg(feature = "client")]
-pub use client::{TypedClientEvent, TypedClientContext, with_typed_client_actor};
+pub use client::{TypedClientContext, TypedClientEvent, with_typed_client_actor};
 
 // ============================================================================
 // Client-side typed actor (WASM)
@@ -619,16 +621,16 @@ pub use client::{TypedClientEvent, TypedClientContext, with_typed_client_actor};
 
 #[cfg(feature = "wasm")]
 mod wasm_client {
-    use crate::framing::{frame_message, MessageBuffer};
+    use crate::framing::{MessageBuffer, frame_message};
     use futures::{FutureExt, StreamExt};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
-    use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsValue;
+    use wasm_bindgen::prelude::*;
 
     /// WASM typed client actor.
-    /// 
+    ///
     /// Connects to a room, opens typed channels, and delivers events to a callback.
     #[wasm_bindgen]
     pub struct JsTypedClientActor {
@@ -643,7 +645,7 @@ mod wasm_client {
     #[wasm_bindgen]
     impl JsTypedClientActor {
         /// Connect and open all channels for a protocol.
-        /// 
+        ///
         /// `channel_ids` is an array of channel ID bytes to open.
         /// Returns a client actor that can receive events and send messages.
         #[wasm_bindgen(js_name = connect)]
@@ -652,12 +654,14 @@ mod wasm_client {
             channel_ids: Vec<u8>,
         ) -> Result<JsTypedClientActor, JsError> {
             let (event_tx, event_rx) = futures::channel::mpsc::unbounded::<JsValue>();
-            let write_channels: Rc<RefCell<HashMap<u8, futures::channel::mpsc::UnboundedSender<Vec<u8>>>>> =
-                Rc::new(RefCell::new(HashMap::new()));
+            let write_channels: Rc<
+                RefCell<HashMap<u8, futures::channel::mpsc::UnboundedSender<Vec<u8>>>>,
+            > = Rc::new(RefCell::new(HashMap::new()));
             let connected = Rc::new(RefCell::new(true));
 
             for &channel_id in &channel_ids {
-                let channel: multiplayer_kit_client::wasm_exports::JsChannel = conn.open_channel().await?;
+                let channel: multiplayer_kit_client::wasm_exports::JsChannel =
+                    conn.open_channel().await?;
 
                 let (write_tx, write_rx) = futures::channel::mpsc::unbounded::<Vec<u8>>();
                 write_channels.borrow_mut().insert(channel_id, write_tx);
@@ -683,17 +687,17 @@ mod wasm_client {
         }
 
         /// Receive the next event.
-        /// 
+        ///
         /// Returns an object with:
         /// - `type`: "connected" | "message" | "disconnected"
         /// - `channelId`: (for message) the channel ID byte
         /// - `data`: (for message) Uint8Array of message bytes
-        /// 
+        ///
         /// Returns `null` when disconnected.
         #[wasm_bindgen(js_name = recv)]
         pub async fn recv(&self) -> Result<JsValue, JsError> {
             use futures::StreamExt;
-            
+
             let event = {
                 let mut rx = self.event_rx.borrow_mut();
                 rx.next().await
@@ -706,7 +710,7 @@ mod wasm_client {
         }
 
         /// Send a message on a specific channel.
-        /// 
+        ///
         /// `channel_id` is the channel ID byte.
         /// `data` is the raw message bytes (will be framed automatically).
         #[wasm_bindgen(js_name = send)]

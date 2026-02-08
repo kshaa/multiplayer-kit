@@ -102,11 +102,7 @@ impl JsApiClient {
     /// Returns { room_id: number, created: boolean }.
     /// `filter` is optional game-specific criteria (JS object or null).
     #[wasm_bindgen]
-    pub async fn quickplay(
-        &self,
-        ticket: &str,
-        filter: JsValue,
-    ) -> Result<JsValue, JsError> {
+    pub async fn quickplay(&self, ticket: &str, filter: JsValue) -> Result<JsValue, JsError> {
         let filter_opt: Option<serde_json::Value> = if filter.is_null() || filter.is_undefined() {
             None
         } else {
@@ -242,11 +238,15 @@ impl JsRoomConnection {
             }
         };
 
-        let config = crate::ConnectionConfig { transport, cert_hash };
+        let config = crate::ConnectionConfig {
+            transport,
+            cert_hash,
+        };
 
-        let inner = crate::RoomConnection::connect_with_config(url, ticket, RoomId(room_id as u64), config)
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let inner =
+            crate::RoomConnection::connect_with_config(url, ticket, RoomId(room_id as u64), config)
+                .await
+                .map_err(|e| JsError::new(&e.to_string()))?;
 
         Ok(JsRoomConnection { inner })
     }
@@ -388,4 +388,3 @@ impl JsLobbyClient {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 }
-

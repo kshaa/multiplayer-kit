@@ -40,11 +40,11 @@ pub use multiplayer_kit_protocol::RoomId;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use multiplayer_kit_helpers::{
-    with_typed_client_actor, TypedClientContext, TypedClientEvent, TypedProtocol,
+    TypedClientContext, TypedClientEvent, TypedProtocol, with_typed_client_actor,
 };
 
 use chat_protocol::{DecodeError, EncodeError};
-use multiplayer_kit_helpers::{frame_message, MessageBuffer};
+use multiplayer_kit_helpers::{MessageBuffer, frame_message};
 
 /// Chat client errors.
 #[derive(Debug, thiserror::Error)]
@@ -210,8 +210,8 @@ mod wasm {
     use super::*;
     use chat_protocol::TypedProtocol;
     use std::cell::RefCell;
-    use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsValue;
+    use wasm_bindgen::prelude::*;
 
     /// Re-export ApiClient from the core client library for convenience.
     pub use multiplayer_kit_client::wasm_exports::JsApiClient;
@@ -270,16 +270,15 @@ mod wasm {
                 (websocket_url, multiplayer_kit_client::Transport::WebSocket)
             };
 
-            let config = multiplayer_kit_client::ConnectionConfig { transport, cert_hash };
+            let config = multiplayer_kit_client::ConnectionConfig {
+                transport,
+                cert_hash,
+            };
 
-            let conn = RoomConnection::connect_with_config(
-                url,
-                ticket,
-                RoomId(room_id as u64),
-                config,
-            )
-            .await
-            .map_err(|e| JsError::new(&e.to_string()))?;
+            let conn =
+                RoomConnection::connect_with_config(url, ticket, RoomId(room_id as u64), config)
+                    .await
+                    .map_err(|e| JsError::new(&e.to_string()))?;
 
             let channel = conn
                 .open_channel()
@@ -287,8 +286,7 @@ mod wasm {
                 .map_err(|e| JsError::new(&e.to_string()))?;
 
             // Send channel identification
-            let channel_id_msg =
-                frame_message(&[ChatProtocol::channel_to_id(ChatChannel::Chat)]);
+            let channel_id_msg = frame_message(&[ChatProtocol::channel_to_id(ChatChannel::Chat)]);
             channel
                 .write(&channel_id_msg)
                 .await
@@ -348,9 +346,7 @@ mod wasm {
                                     state.pending.push(msg);
                                 }
                             }
-                            Err(e) => {
-                                return Err(JsError::new(&format!("Framing error: {}", e)))
-                            }
+                            Err(e) => return Err(JsError::new(&format!("Framing error: {}", e))),
                         }
                     }
 

@@ -9,16 +9,15 @@ use multiplayer_kit_protocol::{ChannelId, RoomConfig, RoomId, RoomInfo, UserCont
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot};
 
 /// Type alias for the room handler factory function.
 /// Now receives both the Room and the config.
-pub type RoomHandlerFactory<T, C> = Arc<
-    dyn Fn(Room<T>, C) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
->;
+pub type RoomHandlerFactory<T, C> =
+    Arc<dyn Fn(Room<T>, C) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 // ============================================================================
 // ServerChannel - bidirectional channel to a single client
@@ -323,7 +322,11 @@ impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
     }
 
     /// Delete a room (creator only).
-    pub async fn delete_room(&self, room_id: RoomId, requester_id: &T::Id) -> Result<(), &'static str> {
+    pub async fn delete_room(
+        &self,
+        room_id: RoomId,
+        requester_id: &T::Id,
+    ) -> Result<(), &'static str> {
         if let Some(mut entry) = self.rooms.get_mut(&room_id) {
             if &entry.creator_id != requester_id {
                 return Err("only creator can delete room");
@@ -355,7 +358,12 @@ impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
         &self,
         room_id: RoomId,
         user: T,
-    ) -> Option<(ChannelId, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, oneshot::Receiver<()>)> {
+    ) -> Option<(
+        ChannelId,
+        mpsc::Sender<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
+        oneshot::Receiver<()>,
+    )> {
         let entry = self.rooms.get(&room_id)?;
 
         // Check max players
@@ -370,7 +378,7 @@ impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
         let user_id = user.id();
 
         // Create channel pairs
-        let (read_tx, read_rx) = mpsc::channel::<Vec<u8>>(256);   // Transport → Handler
+        let (read_tx, read_rx) = mpsc::channel::<Vec<u8>>(256); // Transport → Handler
         let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>(256); // Handler → Transport
         let (close_tx, close_rx) = oneshot::channel();
 
@@ -387,9 +395,12 @@ impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
         // Add to broadcast list
         {
             let mut channels = entry.shared.channels.write().await;
-            channels.insert(channel_id, ChannelBroadcast {
-                write_tx: write_tx.clone(),
-            });
+            channels.insert(
+                channel_id,
+                ChannelBroadcast {
+                    write_tx: write_tx.clone(),
+                },
+            );
         }
 
         // Create ServerChannel for handler

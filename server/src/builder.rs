@@ -66,10 +66,10 @@ impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
     /// Set hostnames/IPs for self-signed certificate (dev mode).
     /// Default: ["localhost", "127.0.0.1"].
     /// Use this for LAN deployments without real TLS certs.
-    /// 
+    ///
     /// Note: Browser enforces max 14-day validity for self-signed certs.
     /// Client must fetch `/cert-hash` to trust the certificate.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// .self_signed_hosts(["192.168.1.50", "game.local"])
@@ -94,11 +94,11 @@ impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
     }
 
     /// Set the room handler factory.
-    /// 
+    ///
     /// The factory is called for each new room and receives both the Room
     /// and the room config. Accept channels with `room.accept()`,
     /// read/write to channels, and broadcast with `room.broadcast()`.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// .room_handler(|mut room, config: MyRoomConfig| async move {
@@ -126,7 +126,9 @@ impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
         F: Fn(Room<T>, C) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        self.handler_factory = Some(Arc::new(move |room, config| Box::pin(factory(room, config))));
+        self.handler_factory = Some(Arc::new(move |room, config| {
+            Box::pin(factory(room, config))
+        }));
         self
     }
 

@@ -1,6 +1,6 @@
 //! JWT ticket issuance and validation.
 
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use multiplayer_kit_protocol::{TicketClaims, UserContext};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,7 +35,8 @@ impl TicketManager {
 
     /// Validate and decode a ticket.
     pub fn validate<T: UserContext>(&self, token: &str) -> Result<T, jsonwebtoken::errors::Error> {
-        let token_data = decode::<TicketClaims<T>>(token, &self.decoding_key, &Validation::default())?;
+        let token_data =
+            decode::<TicketClaims<T>>(token, &self.decoding_key, &Validation::default())?;
         Ok(token_data.claims.user)
     }
 }

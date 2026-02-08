@@ -1,7 +1,7 @@
 //! Lobby client for receiving room updates.
 
-use crate::error::{ConnectionError, ConnectionState, DisconnectReason, ReceiveError};
 use crate::ClientError;
+use crate::error::{ConnectionError, ConnectionState, DisconnectReason, ReceiveError};
 use multiplayer_kit_protocol::LobbyEvent;
 
 // ============================================================================
@@ -11,8 +11,8 @@ use multiplayer_kit_protocol::LobbyEvent;
 #[cfg(feature = "native")]
 mod native {
     use super::*;
-    use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
     #[allow(unused_imports)]
     use tokio::io::AsyncReadExt;
 
@@ -39,9 +39,8 @@ mod native {
                 .expect("valid idle timeout")
                 .build();
 
-            let endpoint = wtransport::Endpoint::client(config).map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(e.to_string()))
-            })?;
+            let endpoint = wtransport::Endpoint::client(config)
+                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
 
             let lobby_url = format!("{}/lobby", url);
             let connection = endpoint.connect(&lobby_url).await.map_err(|e| {
@@ -64,9 +63,10 @@ mod native {
                 .await
                 .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
 
-            send_stream.write_all(ticket.as_bytes()).await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(e.to_string()))
-            })?;
+            send_stream
+                .write_all(ticket.as_bytes())
+                .await
+                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
 
             drop(send_stream);
 
@@ -120,9 +120,8 @@ mod native {
                 return Err(ClientError::Receive(ReceiveError::Stream(e.to_string())));
             }
 
-            bincode::deserialize(&buf).map_err(|e| {
-                ClientError::Receive(ReceiveError::MalformedMessage(e.to_string()))
-            })
+            bincode::deserialize(&buf)
+                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
         }
 
         fn mark_disconnected(&mut self, reason: DisconnectReason) {
@@ -276,9 +275,12 @@ mod wasm {
                 self.buffer.extend(chunk);
             }
 
-            let len =
-                u32::from_be_bytes([self.buffer[0], self.buffer[1], self.buffer[2], self.buffer[3]])
-                    as usize;
+            let len = u32::from_be_bytes([
+                self.buffer[0],
+                self.buffer[1],
+                self.buffer[2],
+                self.buffer[3],
+            ]) as usize;
 
             while self.buffer.len() < 4 + len {
                 let chunk = self.read_chunk().await?;
@@ -292,9 +294,8 @@ mod wasm {
 
             let msg_data: Vec<u8> = self.buffer.drain(..4 + len).skip(4).collect();
 
-            bincode::deserialize(&msg_data).map_err(|e| {
-                ClientError::Receive(ReceiveError::MalformedMessage(e.to_string()))
-            })
+            bincode::deserialize(&msg_data)
+                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
         }
 
         async fn read_chunk(&mut self) -> Result<Vec<u8>, ClientError> {
@@ -314,9 +315,8 @@ mod wasm {
                 return Ok(Vec::new());
             }
 
-            let value = js_sys::Reflect::get(&result_obj, &"value".into()).map_err(|e| {
-                ClientError::Receive(ReceiveError::Stream(format!("{:?}", e)))
-            })?;
+            let value = js_sys::Reflect::get(&result_obj, &"value".into())
+                .map_err(|e| ClientError::Receive(ReceiveError::Stream(format!("{:?}", e))))?;
 
             let array: js_sys::Uint8Array = value.unchecked_into();
             Ok(array.to_vec())

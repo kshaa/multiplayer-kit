@@ -1,7 +1,7 @@
 //! HTTP/REST API client for ticketing, room management, and server metadata.
 
-use crate::error::{ConnectionError, ReceiveError};
 use crate::ClientError;
+use crate::error::{ConnectionError, ReceiveError};
 use multiplayer_kit_protocol::{QuickplayResponse, RoomId, RoomInfo};
 use serde::{Deserialize, Serialize};
 
@@ -87,12 +87,10 @@ mod native {
         /// Returns `None` if the server doesn't expose a cert hash (e.g., using real certs).
         pub async fn get_cert_hash(&self) -> Result<Option<String>, ClientError> {
             let url = format!("{}/cert-hash", self.base_url);
-            let resp = self
-                .http_client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
+            let resp =
+                self.http_client.get(&url).send().await.map_err(|e| {
+                    ClientError::Connection(ConnectionError::Transport(e.to_string()))
+                })?;
 
             if resp.status().is_success() {
                 let data: CertHashResponse = resp.json().await.map_err(|e| {
@@ -113,12 +111,10 @@ mod native {
         /// List all available rooms.
         pub async fn list_rooms(&self) -> Result<Vec<RoomInfo>, ClientError> {
             let url = format!("{}/rooms", self.base_url);
-            let resp = self
-                .http_client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
+            let resp =
+                self.http_client.get(&url).send().await.map_err(|e| {
+                    ClientError::Connection(ConnectionError::Transport(e.to_string()))
+                })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -265,27 +261,35 @@ mod wasm {
                 opts.set_body(&JsValue::from_str(&b));
             }
 
-            let request = Request::new_with_str_and_init(&url, &opts)
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("{:?}", e))))?;
+            let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| {
+                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
+            })?;
 
             request
                 .headers()
                 .set("Content-Type", "application/json")
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("{:?}", e))))?;
+                .map_err(|e| {
+                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
+                })?;
 
             if let Some(token) = auth_token {
                 request
                     .headers()
                     .set("Authorization", &format!("Bearer {}", token))
-                    .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("{:?}", e))))?;
+                    .map_err(|e| {
+                        ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
+                    })?;
             }
 
-            let window = web_sys::window()
-                .ok_or_else(|| ClientError::Connection(ConnectionError::Transport("No window".to_string())))?;
+            let window = web_sys::window().ok_or_else(|| {
+                ClientError::Connection(ConnectionError::Transport("No window".to_string()))
+            })?;
 
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("{:?}", e))))?;
+                .map_err(|e| {
+                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
+                })?;
 
             let resp: Response = resp_value.unchecked_into();
 
@@ -300,9 +304,9 @@ mod wasm {
                 )));
             }
 
-            let json = JsFuture::from(resp.json().unwrap())
-                .await
-                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(format!("{:?}", e))))?;
+            let json = JsFuture::from(resp.json().unwrap()).await.map_err(|e| {
+                ClientError::Receive(ReceiveError::MalformedMessage(format!("{:?}", e)))
+            })?;
 
             serde_wasm_bindgen::from_value(json)
                 .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
@@ -319,15 +323,19 @@ mod wasm {
             opts.set_method(method);
             opts.set_mode(RequestMode::Cors);
 
-            let request = Request::new_with_str_and_init(&url, &opts)
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("{:?}", e))))?;
+            let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| {
+                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
+            })?;
 
-            let window = web_sys::window()
-                .ok_or_else(|| ClientError::Connection(ConnectionError::Transport("No window".to_string())))?;
+            let window = web_sys::window().ok_or_else(|| {
+                ClientError::Connection(ConnectionError::Transport("No window".to_string()))
+            })?;
 
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("{:?}", e))))?;
+                .map_err(|e| {
+                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
+                })?;
 
             let resp: Response = resp_value.unchecked_into();
 
@@ -346,9 +354,9 @@ mod wasm {
                 )));
             }
 
-            let json = JsFuture::from(resp.json().unwrap())
-                .await
-                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(format!("{:?}", e))))?;
+            let json = JsFuture::from(resp.json().unwrap()).await.map_err(|e| {
+                ClientError::Receive(ReceiveError::MalformedMessage(format!("{:?}", e)))
+            })?;
 
             let value: T = serde_wasm_bindgen::from_value(json)
                 .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))?;
@@ -385,8 +393,7 @@ mod wasm {
         ) -> Result<CreateRoomResponse, ClientError> {
             let body = serde_json::to_string(config)
                 .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-            self.fetch("POST", "/rooms", Some(body), Some(ticket))
-                .await
+            self.fetch("POST", "/rooms", Some(body), Some(ticket)).await
         }
 
         /// Delete a room.
@@ -397,20 +404,26 @@ mod wasm {
             opts.set_method("DELETE");
             opts.set_mode(RequestMode::Cors);
 
-            let request = Request::new_with_str_and_init(&url, &opts)
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("{:?}", e))))?;
+            let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| {
+                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
+            })?;
 
             request
                 .headers()
                 .set("Authorization", &format!("Bearer {}", ticket))
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("{:?}", e))))?;
+                .map_err(|e| {
+                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
+                })?;
 
-            let window = web_sys::window()
-                .ok_or_else(|| ClientError::Connection(ConnectionError::Transport("No window".to_string())))?;
+            let window = web_sys::window().ok_or_else(|| {
+                ClientError::Connection(ConnectionError::Transport("No window".to_string()))
+            })?;
 
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("{:?}", e))))?;
+                .map_err(|e| {
+                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
+                })?;
 
             let resp: Response = resp_value.unchecked_into();
 
@@ -435,8 +448,9 @@ mod wasm {
             filter: Option<&F>,
         ) -> Result<QuickplayResponse, ClientError> {
             let body = match filter {
-                Some(f) => serde_json::to_string(f)
-                    .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?,
+                Some(f) => serde_json::to_string(f).map_err(|e| {
+                    ClientError::Connection(ConnectionError::Transport(e.to_string()))
+                })?,
                 None => "{}".to_string(),
             };
             self.fetch("POST", "/quickplay", Some(body), Some(ticket))
@@ -495,7 +509,11 @@ mod fallback {
             )))
         }
 
-        pub async fn delete_room(&self, _ticket: &str, _room_id: RoomId) -> Result<(), ClientError> {
+        pub async fn delete_room(
+            &self,
+            _ticket: &str,
+            _room_id: RoomId,
+        ) -> Result<(), ClientError> {
             Err(ClientError::Connection(ConnectionError::Transport(
                 "No HTTP feature enabled".to_string(),
             )))

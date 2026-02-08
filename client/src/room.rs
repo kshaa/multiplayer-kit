@@ -8,8 +8,8 @@
 //! - WebTransport: Each channel is a QUIC bidirectional stream
 //! - WebSocket: Each channel is a separate WebSocket connection
 
-use crate::error::{ConnectionError, DisconnectReason, ReceiveError, SendError};
 use crate::ClientError;
+use crate::error::{ConnectionError, DisconnectReason, ReceiveError, SendError};
 use multiplayer_kit_protocol::RoomId;
 
 // ============================================================================
@@ -19,8 +19,8 @@ use multiplayer_kit_protocol::RoomId;
 #[cfg(feature = "native")]
 mod native {
     use super::*;
-    use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
     use tokio::sync::Mutex;
 
     const STATE_CONNECTED: u8 = 2;
@@ -82,7 +82,11 @@ mod native {
 
     impl RoomConnection {
         /// Connect to a room using default config (WebTransport).
-        pub async fn connect(url: &str, ticket: &str, room_id: RoomId) -> Result<Self, ClientError> {
+        pub async fn connect(
+            url: &str,
+            ticket: &str,
+            room_id: RoomId,
+        ) -> Result<Self, ClientError> {
             Self::connect_with_config(url, ticket, room_id, ConnectionConfig::default()).await
         }
 
@@ -95,11 +99,16 @@ mod native {
         ) -> Result<Self, ClientError> {
             match config.transport {
                 Transport::WebTransport => {
-                    Self::connect_webtransport(url, ticket, room_id, config.cert_hash, config.validate_certs).await
+                    Self::connect_webtransport(
+                        url,
+                        ticket,
+                        room_id,
+                        config.cert_hash,
+                        config.validate_certs,
+                    )
+                    .await
                 }
-                Transport::WebSocket => {
-                    Self::connect_websocket(url, ticket, room_id).await
-                }
+                Transport::WebSocket => Self::connect_websocket(url, ticket, room_id).await,
             }
         }
 
@@ -116,14 +125,21 @@ mod native {
                 use base64::Engine;
                 let hash_bytes = base64::engine::general_purpose::STANDARD
                     .decode(&hash_b64)
-                    .map_err(|e| ClientError::Connection(ConnectionError::Transport(format!("Invalid cert hash: {}", e))))?;
-                
+                    .map_err(|e| {
+                        ClientError::Connection(ConnectionError::Transport(format!(
+                            "Invalid cert hash: {}",
+                            e
+                        )))
+                    })?;
+
                 wtransport::ClientConfig::builder()
                     .with_bind_default()
                     .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(
                         hash_bytes.try_into().map_err(|_| {
-                            ClientError::Connection(ConnectionError::Transport("Cert hash must be 32 bytes".into()))
-                        })?
+                            ClientError::Connection(ConnectionError::Transport(
+                                "Cert hash must be 32 bytes".into(),
+                            ))
+                        })?,
                     )])
                     .keep_alive_interval(Some(std::time::Duration::from_secs(5)))
                     .max_idle_timeout(Some(std::time::Duration::from_secs(30)))
@@ -149,15 +165,15 @@ mod native {
                     .build()
             };
 
-            let endpoint = wtransport::Endpoint::client(wt_config).map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(e.to_string()))
-            })?;
+            let endpoint = wtransport::Endpoint::client(wt_config)
+                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
 
             // Auth via URL query param (like WebSocket)
             let room_url = format!("{}/room/{}?ticket={}", url, room_id.0, ticket);
-            let connection = endpoint.connect(&room_url).await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(e.to_string()))
-            })?;
+            let connection = endpoint
+                .connect(&room_url)
+                .await
+                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
 
             Ok(Self {
                 transport: Transport::WebTransport,
@@ -177,13 +193,12 @@ mod native {
             let ws_url = url
                 .replace("https://", "wss://")
                 .replace("http://", "ws://");
-            
+
             let base_url = format!("{}/ws/room/{}?ticket={}", ws_url, room_id.0, ticket);
 
             // Just verify we can parse the URL; actual connection happens in open_channel
-            url::Url::parse(&base_url).map_err(|e| {
-                ClientError::Connection(ConnectionError::InvalidUrl(e.to_string()))
-            })?;
+            url::Url::parse(&base_url)
+                .map_err(|e| ClientError::Connection(ConnectionError::InvalidUrl(e.to_string())))?;
 
             Ok(Self {
                 transport: Transport::WebSocket,
@@ -228,19 +243,19 @@ mod native {
                 ClientError::Connection(ConnectionError::Transport("Not connected".to_string()))
             })?;
 
-            let (ws_stream, _) = tokio_tungstenite::connect_async(url).await.map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(e.to_string()))
-            })?;
+            let (ws_stream, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
 
             // Wait for join confirmation
             use futures::StreamExt;
             let (write, mut read) = ws_stream.split();
-            
+
             // Read first message (should be "joined")
             if let Some(msg) = read.next().await {
                 match msg {
-                    Ok(tokio_tungstenite::tungstenite::Message::Binary(_)) |
-                    Ok(tokio_tungstenite::tungstenite::Message::Text(_)) => {
+                    Ok(tokio_tungstenite::tungstenite::Message::Binary(_))
+                    | Ok(tokio_tungstenite::tungstenite::Message::Text(_)) => {
                         // Got confirmation
                     }
                     _ => {
@@ -292,17 +307,25 @@ mod native {
             recv: Arc<Mutex<wtransport::RecvStream>>,
         },
         WebSocket {
-            write: Arc<Mutex<futures::stream::SplitSink<
-                tokio_tungstenite::WebSocketStream<
-                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>
+            write: Arc<
+                Mutex<
+                    futures::stream::SplitSink<
+                        tokio_tungstenite::WebSocketStream<
+                            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                        >,
+                        tokio_tungstenite::tungstenite::Message,
+                    >,
                 >,
-                tokio_tungstenite::tungstenite::Message,
-            >>>,
-            read: Arc<Mutex<futures::stream::SplitStream<
-                tokio_tungstenite::WebSocketStream<
-                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>
+            >,
+            read: Arc<
+                Mutex<
+                    futures::stream::SplitStream<
+                        tokio_tungstenite::WebSocketStream<
+                            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                        >,
+                    >,
                 >,
-            >>>,
+            >,
         },
     }
 
@@ -322,7 +345,9 @@ mod native {
                     use futures::SinkExt;
                     let mut write = write.lock().await;
                     write
-                        .send(tokio_tungstenite::tungstenite::Message::Binary(data.to_vec().into()))
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(
+                            data.to_vec().into(),
+                        ))
                         .await
                         .map_err(|e| {
                             self.state.store(STATE_LOST, Ordering::Relaxed);
@@ -466,7 +491,11 @@ mod wasm {
     }
 
     impl RoomConnection {
-        pub async fn connect(url: &str, ticket: &str, room_id: RoomId) -> Result<Self, ClientError> {
+        pub async fn connect(
+            url: &str,
+            ticket: &str,
+            room_id: RoomId,
+        ) -> Result<Self, ClientError> {
             Self::connect_with_config(url, ticket, room_id, ConnectionConfig::default()).await
         }
 
@@ -480,9 +509,7 @@ mod wasm {
                 Transport::WebTransport => {
                     Self::connect_webtransport(url, ticket, room_id, config.cert_hash).await
                 }
-                Transport::WebSocket => {
-                    Self::connect_websocket(url, ticket, room_id).await
-                }
+                Transport::WebSocket => Self::connect_websocket(url, ticket, room_id).await,
             }
         }
 
@@ -602,7 +629,9 @@ mod wasm {
             });
 
             JsFuture::from(open_promise).await.map_err(|_| {
-                ClientError::Connection(ConnectionError::Transport("WebSocket open failed".to_string()))
+                ClientError::Connection(ConnectionError::Transport(
+                    "WebSocket open failed".to_string(),
+                ))
             })?;
 
             Ok(Channel {
@@ -672,8 +701,9 @@ mod wasm {
                         .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
 
                     let result = JsFuture::from(reader.read()).await.map_err(|e| {
-                        *self.state.borrow_mut() =
-                            ConnectionState::Lost(DisconnectReason::NetworkError(format!("{:?}", e)));
+                        *self.state.borrow_mut() = ConnectionState::Lost(
+                            DisconnectReason::NetworkError(format!("{:?}", e)),
+                        );
                         ClientError::Receive(ReceiveError::Stream(format!("{:?}", e)))
                     })?;
 
@@ -686,13 +716,15 @@ mod wasm {
                         .unwrap_or(true);
 
                     if done {
-                        *self.state.borrow_mut() = ConnectionState::Lost(DisconnectReason::ServerClosed);
+                        *self.state.borrow_mut() =
+                            ConnectionState::Lost(DisconnectReason::ServerClosed);
                         return Err(ClientError::Disconnected(DisconnectReason::ServerClosed));
                     }
 
-                    let value = js_sys::Reflect::get(&result_obj, &"value".into()).map_err(|e| {
-                        ClientError::Receive(ReceiveError::Stream(format!("{:?}", e)))
-                    })?;
+                    let value =
+                        js_sys::Reflect::get(&result_obj, &"value".into()).map_err(|e| {
+                            ClientError::Receive(ReceiveError::Stream(format!("{:?}", e)))
+                        })?;
 
                     let array: js_sys::Uint8Array = value.unchecked_into();
                     let data = array.to_vec();
@@ -824,7 +856,11 @@ mod fallback {
     pub struct Channel;
 
     impl RoomConnection {
-        pub async fn connect(_url: &str, _ticket: &str, _room_id: RoomId) -> Result<Self, ClientError> {
+        pub async fn connect(
+            _url: &str,
+            _ticket: &str,
+            _room_id: RoomId,
+        ) -> Result<Self, ClientError> {
             Err(ClientError::Connection(ConnectionError::Transport(
                 "No transport feature enabled".to_string(),
             )))

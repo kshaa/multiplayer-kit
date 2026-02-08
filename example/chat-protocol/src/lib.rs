@@ -135,8 +135,8 @@ impl TypedProtocol for ChatProtocol {
     fn encode(event: &ChatEvent) -> Result<(ChatChannel, Vec<u8>), EncodeError> {
         match event {
             ChatEvent::Chat(msg) => {
-                let data = bincode::serialize(msg)
-                    .map_err(|e| EncodeError::Serialize(e.to_string()))?;
+                let data =
+                    bincode::serialize(msg).map_err(|e| EncodeError::Serialize(e.to_string()))?;
                 Ok((ChatChannel::Chat, data))
             }
         }

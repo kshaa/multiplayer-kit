@@ -3,12 +3,12 @@
 //! Run with: cargo run --bin chat-server
 
 use chat_protocol::{ChatChannel, ChatEvent, ChatMessage, ChatProtocol, ChatRoomConfig, ChatUser};
-use multiplayer_kit_helpers::{with_typed_actor, TypedContext, TypedEvent};
+use multiplayer_kit_helpers::{TypedContext, TypedEvent, with_typed_actor};
 use multiplayer_kit_protocol::RejectReason;
 use multiplayer_kit_server::{AuthRequest, Server};
 use serde::Deserialize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_USER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -35,7 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .quic_addr("127.0.0.1:8080")
         .jwt_secret(b"super-secret-key-for-dev-only")
         .auth_handler(|req: AuthRequest| async move {
-            let body = req.body.ok_or(RejectReason::Custom("Missing body".into()))?;
+            let body = req
+                .body
+                .ok_or(RejectReason::Custom("Missing body".into()))?;
 
             #[derive(Deserialize)]
             struct AuthBody {
@@ -50,7 +52,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if auth.username.len() > 32 {
-                return Err(RejectReason::Custom("Username too long (max 32 chars)".into()));
+                return Err(RejectReason::Custom(
+                    "Username too long (max 32 chars)".into(),
+                ));
             }
 
             let user = ChatUser {
@@ -62,7 +66,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(user)
         })
         // Typed actor - handles events with automatic framing and serialization
-        .room_handler(with_typed_actor::<ChatUser, ChatProtocol, ChatRoomConfig, _, _>(chat_actor))
+        .room_handler(with_typed_actor::<
+            ChatUser,
+            ChatProtocol,
+            ChatRoomConfig,
+            _,
+            _,
+        >(chat_actor))
         .build()
         .expect("Failed to build server");
 
@@ -81,7 +91,12 @@ async fn chat_actor(
 
     match event {
         TypedEvent::UserConnected(user) => {
-            tracing::info!("[Room {:?} '{}'] {} connected", room_id, config.name, user.username);
+            tracing::info!(
+                "[Room {:?} '{}'] {} connected",
+                room_id,
+                config.name,
+                user.username
+            );
 
             // Broadcast join message
             let msg = ChatEvent::Chat(ChatMessage::System(format!(
@@ -92,7 +107,12 @@ async fn chat_actor(
         }
 
         TypedEvent::UserDisconnected(user) => {
-            tracing::info!("[Room {:?} '{}'] {} disconnected", room_id, config.name, user.username);
+            tracing::info!(
+                "[Room {:?} '{}'] {} disconnected",
+                room_id,
+                config.name,
+                user.username
+            );
 
             // Broadcast leave message
             let msg = ChatEvent::Chat(ChatMessage::System(format!(

@@ -4,7 +4,7 @@ use crate::lobby::Lobby;
 use crate::room::RoomManager;
 use crate::ticket::TicketManager;
 use crate::{AuthFuture, AuthRequest};
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use multiplayer_kit_protocol::{QuickplayResponse, RoomConfig, RoomId, UserContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -145,9 +145,7 @@ pub async fn create_room<T: UserContext, C: RoomConfig>(
         state.lobby.notify_room_created(info);
     }
 
-    HttpResponse::Ok().json(CreateRoomResponse {
-        room_id: room_id.0,
-    })
+    HttpResponse::Ok().json(CreateRoomResponse { room_id: room_id.0 })
 }
 
 /// DELETE /rooms/{id} - Delete a room (creator only).

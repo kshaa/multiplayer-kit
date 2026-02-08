@@ -7,7 +7,7 @@ use crate::lobby::Lobby;
 use crate::room::RoomManager;
 use crate::ticket::TicketManager;
 use actix::{Actor, ActorContext, AsyncContext, Handler, Message, StreamHandler};
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use actix_web_actors::ws;
 use multiplayer_kit_protocol::{ChannelId, RoomConfig, RoomId, UserContext};
 use std::sync::Arc;
@@ -73,14 +73,17 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> RoomWsActor<T, C
     }
 
     fn heartbeat(&self, ctx: &mut ws::WebsocketContext<Self>) {
-        ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx: &mut ws::WebsocketContext<Self>| {
-            if Instant::now().duration_since(act.last_heartbeat) > CLIENT_TIMEOUT {
-                tracing::debug!("WebSocket client heartbeat timeout");
-                ctx.stop();
-                return;
-            }
-            ctx.ping(b"");
-        });
+        ctx.run_interval(
+            HEARTBEAT_INTERVAL,
+            |act, ctx: &mut ws::WebsocketContext<Self>| {
+                if Instant::now().duration_since(act.last_heartbeat) > CLIENT_TIMEOUT {
+                    tracing::debug!("WebSocket client heartbeat timeout");
+                    ctx.stop();
+                    return;
+                }
+                ctx.ping(b"");
+            },
+        );
     }
 
     fn start_listeners(&mut self, ctx: &mut ws::WebsocketContext<Self>) {
@@ -134,7 +137,9 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Actor for RoomWs
     }
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<RoomMessage> for RoomWsActor<T, C> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<RoomMessage>
+    for RoomWsActor<T, C>
+{
     type Result = ();
 
     fn handle(&mut self, msg: RoomMessage, ctx: &mut Self::Context) {
@@ -142,7 +147,9 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<RoomMess
     }
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<ChannelClosed> for RoomWsActor<T, C> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<ChannelClosed>
+    for RoomWsActor<T, C>
+{
     type Result = ();
 
     fn handle(&mut self, _msg: ChannelClosed, ctx: &mut Self::Context) {
@@ -150,8 +157,8 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<ChannelC
     }
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> StreamHandler<Result<ws::Message, ws::ProtocolError>>
-    for RoomWsActor<T, C>
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>
+    StreamHandler<Result<ws::Message, ws::ProtocolError>> for RoomWsActor<T, C>
 {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         match msg {
@@ -216,7 +223,7 @@ pub async fn room_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
 
     // Open channel via room manager
     let channel_result = state.room_manager.open_channel(room_id, user).await;
-    
+
     let Some((channel_id, read_tx, write_rx, close_rx)) = channel_result else {
         return Err(actix_web::error::ErrorNotFound("Room not found or closed"));
     };

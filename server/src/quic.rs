@@ -9,8 +9,8 @@ use crate::ticket::TicketManager;
 use multiplayer_kit_protocol::{ChannelId, LobbyEvent, RoomConfig, RoomId, UserContext};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
-use wtransport::endpoint::IncomingSession;
 use wtransport::Connection;
+use wtransport::endpoint::IncomingSession;
 
 /// Shared state for QUIC handlers.
 pub struct QuicState<T: UserContext, C: RoomConfig> {
@@ -117,7 +117,7 @@ async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
 }
 
 /// Handle a room WebTransport connection.
-/// 
+///
 /// Protocol (simplified - auth in URL):
 /// 1. Client connects with ticket in query param
 /// 2. Server validates before accepting
@@ -141,21 +141,21 @@ async fn handle_room_connection<T: UserContext, C: RoomConfig>(
                         let channel_result = state.room_manager
                             .open_channel(room_id, user.clone())
                             .await;
-                        
+
                         let Some((channel_id, read_tx, write_rx, close_rx)) = channel_result else {
                             tracing::warn!("Failed to open channel in room {:?}", room_id);
                             break;
                         };
-                        
+
                         // Notify lobby of player count change
                         if let Some(info) = state.room_manager.get_room_info(room_id) {
                             state.lobby.notify_room_updated(info);
                         }
-                        
+
                         // Spawn a task to handle this channel's persistent bi-stream
                         let rm = Arc::clone(&state.room_manager);
                         let rid = room_id;
-                        
+
                         let task = tokio::spawn(async move {
                             handle_channel_stream(send, recv, channel_id, read_tx, write_rx, close_rx).await;
                             // Channel ended, close it
@@ -191,7 +191,7 @@ async fn handle_room_connection<T: UserContext, C: RoomConfig>(
 }
 
 /// Handle a single persistent channel bi-stream.
-/// 
+///
 /// This is bidirectional:
 /// - Reads from QUIC stream and forwards to room handler via read_tx
 /// - Receives from write_rx and writes back to QUIC stream
@@ -204,17 +204,17 @@ async fn handle_channel_stream(
     mut close_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let mut buf = vec![0u8; 64 * 1024]; // 64KB read buffer
-    
+
     loop {
         tokio::select! {
             biased;
-            
+
             // Check for close signal
             _ = &mut close_rx => {
                 tracing::debug!("Channel close signal received");
                 break;
             }
-            
+
             // Read from QUIC stream (client sends)
             result = recv.read(&mut buf) => {
                 match result {
@@ -228,7 +228,7 @@ async fn handle_channel_stream(
                     _ => break, // Stream closed or error
                 }
             }
-            
+
             // Write to QUIC stream (handler sends)
             result = write_rx.recv() => {
                 match result {

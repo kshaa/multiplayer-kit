@@ -14,16 +14,16 @@ use crate::room::{RoomHandlerFactory, RoomManager, RoomSettings};
 use crate::ticket::TicketManager;
 use crate::ws::WsState;
 use actix_cors::Cors;
-use actix_web::{web, App, HttpServer};
+use actix_web::{App, HttpServer, web};
 use multiplayer_kit_protocol::{RejectReason, RoomConfig, UserContext};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use wtransport::tls::Sha256DigestFmt;
 use wtransport::Identity;
 use wtransport::ServerConfig as WtServerConfig;
+use wtransport::tls::Sha256DigestFmt;
 
 pub use builder::ServerBuilder;
 pub use error::ServerError;
@@ -68,10 +68,10 @@ impl ServerConfig {
     fn default() -> Self {
         Self {
             http_addr: "0.0.0.0:8080".to_string(),
-            quic_addr: "0.0.0.0:8080".to_string(),  // Same port, different protocol (UDP vs TCP)
-            room_max_lifetime_secs: 3600,         // 1 hour
-            room_first_connect_timeout_secs: 300, // 5 minutes
-            room_empty_timeout_secs: 300,         // 5 minutes
+            quic_addr: "0.0.0.0:8080".to_string(), // Same port, different protocol (UDP vs TCP)
+            room_max_lifetime_secs: 3600,          // 1 hour
+            room_first_connect_timeout_secs: 300,  // 5 minutes
+            room_empty_timeout_secs: 300,          // 5 minutes
             tls_cert: None,
             tls_key: None,
             self_signed_hosts: vec!["localhost".to_string(), "127.0.0.1".to_string()],
@@ -109,49 +109,60 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
             empty_timeout: Duration::from_secs(self.config.room_empty_timeout_secs),
         };
 
-        let room_manager = Arc::new(RoomManager::<T, C>::new(room_settings, self.handler_factory));
+        let room_manager = Arc::new(RoomManager::<T, C>::new(
+            room_settings,
+            self.handler_factory,
+        ));
         let ticket_manager = Arc::new(TicketManager::new(&self.jwt_secret));
         let lobby = Arc::new(Lobby::new());
 
         // Load TLS identity - either from files or generate self-signed
         let identity = match (&self.config.tls_cert, &self.config.tls_key) {
             (Some(cert_path), Some(key_path)) => {
-                tracing::info!("Loading TLS certificate from {} and key from {}", cert_path, key_path);
+                tracing::info!(
+                    "Loading TLS certificate from {} and key from {}",
+                    cert_path,
+                    key_path
+                );
                 Identity::load_pemfiles(cert_path, key_path)
                     .await
                     .map_err(|e| ServerError::Quic(format!("Failed to load TLS cert/key: {}", e)))?
             }
             (Some(_), None) => {
-                return Err(ServerError::Config("tls_cert specified without tls_key".into()));
+                return Err(ServerError::Config(
+                    "tls_cert specified without tls_key".into(),
+                ));
             }
             (None, Some(_)) => {
-                return Err(ServerError::Config("tls_key specified without tls_cert".into()));
+                return Err(ServerError::Config(
+                    "tls_key specified without tls_cert".into(),
+                ));
             }
             (None, None) => {
-                let hosts: Vec<&str> = self.config.self_signed_hosts.iter().map(|s| s.as_str()).collect();
+                let hosts: Vec<&str> = self
+                    .config
+                    .self_signed_hosts
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
                 tracing::info!("Generating self-signed certificate for: {:?}", hosts);
-                Identity::self_signed(&hosts)
-                    .map_err(|e| ServerError::Quic(e.to_string()))?
+                Identity::self_signed(&hosts).map_err(|e| ServerError::Quic(e.to_string()))?
             }
         };
 
         // Get certificate hash for browser WebTransport
-        let cert_hash_b64 = identity
-            .certificate_chain()
-            .as_slice()
-            .first()
-            .map(|cert| {
-                let hash = cert.hash();
-                tracing::info!(
-                    "Certificate SHA-256 hash: {}",
-                    hash.fmt(Sha256DigestFmt::DottedHex)
-                );
-                let hash_bytes: &[u8] = hash.as_ref();
-                use base64::Engine;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(hash_bytes);
-                tracing::info!("Certificate hash (base64 for browser): {}", b64);
-                b64
-            });
+        let cert_hash_b64 = identity.certificate_chain().as_slice().first().map(|cert| {
+            let hash = cert.hash();
+            tracing::info!(
+                "Certificate SHA-256 hash: {}",
+                hash.fmt(Sha256DigestFmt::DottedHex)
+            );
+            let hash_bytes: &[u8] = hash.as_ref();
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(hash_bytes);
+            tracing::info!("Certificate hash (base64 for browser): {}", b64);
+            b64
+        });
 
         let cert_hash = Arc::new(tokio::sync::RwLock::new(cert_hash_b64));
 
@@ -184,7 +195,9 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
-                lifecycle_room_manager.run_lifecycle_checks(&lifecycle_lobby).await;
+                lifecycle_room_manager
+                    .run_lifecycle_checks(&lifecycle_lobby)
+                    .await;
             }
         });
 

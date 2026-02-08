@@ -3,8 +3,8 @@
 //! Run with: cargo run --bin chat-cli
 
 use chat_client::{
-    ApiClient, ChatEvent, ChatMessage, ChatProtocol, RoomConnection, RoomId,
-    TypedClientContext, TypedClientEvent, with_typed_client_actor,
+    ApiClient, ChatEvent, ChatMessage, ChatProtocol, RoomConnection, RoomId, TypedClientContext,
+    TypedClientEvent, with_typed_client_actor,
 };
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
@@ -196,7 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Ok(resp) => {
                                         let action = if resp.created { "Created" } else { "Found" };
                                         println!("{} room {}. Joining...", action, resp.room_id.0);
-                                        
+
                                         match RoomConnection::connect(SERVER_QUIC, &ticket, resp.room_id).await {
                                             Ok(conn) => {
                                                 let (tx, rx) = mpsc::channel::<String>(256);
@@ -360,8 +360,13 @@ async fn run_chat_actor(
                             }
                         });
                     }
-                    TypedClientEvent::Message(ChatEvent::Chat(ChatMessage::Text { username, content })) => {
-                        let _ = ui_tx.send(UiEvent::Message(format!("{}: {}", username, content))).await;
+                    TypedClientEvent::Message(ChatEvent::Chat(ChatMessage::Text {
+                        username,
+                        content,
+                    })) => {
+                        let _ = ui_tx
+                            .send(UiEvent::Message(format!("{}: {}", username, content)))
+                            .await;
                     }
                     TypedClientEvent::Message(ChatEvent::Chat(ChatMessage::System(msg))) => {
                         let _ = ui_tx.send(UiEvent::Message(msg)).await;
