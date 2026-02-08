@@ -3,29 +3,10 @@
 //! Provides optional abstractions on top of the raw channel API:
 //! - Message framing (length-prefixed)
 //! - Typed channels with automatic serialization
-//! - Actor pattern helpers
 
 mod framing;
 
 pub use framing::{frame_message, MessageBuffer, FramingError};
-
-#[cfg(any(feature = "client", feature = "wasm"))]
-mod channel;
-
-#[cfg(any(feature = "client", feature = "wasm"))]
-pub use channel::{MessageChannel, MessageChannelError};
-
-// Old actor module (kept for backwards compat)
-#[cfg(feature = "server")]
-mod actor;
-
-#[cfg(feature = "server")]
-pub use actor::{
-    with_actor, with_framing,
-    RoomContext, RoomEvent,
-    MessageContext, MessageEvent,
-    Outgoing, Route,
-};
 
 // Typed module - available for server and client (wasm or native)
 #[cfg(any(feature = "server", feature = "client", feature = "wasm"))]

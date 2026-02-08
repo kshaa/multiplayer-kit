@@ -12,7 +12,3 @@ pub use error::{
 };
 pub use lobby::LobbyClient;
 pub use room::{Channel, ConnectionConfig, RoomConnection, Transport};
-
-// Deprecated alias
-#[allow(deprecated)]
-pub use room::RoomClient;

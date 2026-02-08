@@ -909,7 +909,3 @@ pub use wasm::{Channel, ConnectionConfig, RoomConnection, Transport};
 
 #[cfg(not(any(feature = "native", all(feature = "wasm", target_arch = "wasm32"))))]
 pub use fallback::{Channel, ConnectionConfig, RoomConnection, Transport};
-
-// Keep old RoomClient as deprecated alias for migration
-#[deprecated(note = "Use RoomConnection and Channel instead")]
-pub type RoomClient = RoomConnection;
