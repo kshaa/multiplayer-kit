@@ -16,14 +16,16 @@ cargo run --bin chat-cli
 
 ## Endpoints
 
+REST API at `http://127.0.0.1:8080`. Ticket is passed via `Authorization: Bearer <ticket>` header.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/ticket` | Get auth ticket. Body: `{"username": "name"}` |
 | POST | `/rooms` | Create room. Body: `{"name": "Room Name"}`. Requires ticket. |
-| GET | `/rooms` | List rooms |
-| DELETE | `/rooms/{id}` | Delete room |
+| GET | `/rooms` | List rooms. Requires ticket. |
+| DELETE | `/rooms/{id}` | Delete room. Requires ticket (creator only). |
 | POST | `/quickplay` | Auto-join or create room. Requires ticket. |
-| GET | `/cert-hash` | Get WebTransport certificate hash |
+| GET | `/cert-hash` | Get WebTransport certificate hash (no auth). |
 
 WebTransport (QUIC/UDP) at `https://127.0.0.1:8080`:
 - `/room/{id}?ticket=...` - Join room

@@ -261,8 +261,12 @@
         }
 
         async function refreshRooms() {
+            if (!ticket) {
+                log('Get a ticket first to view rooms', true);
+                return;
+            }
             try {
-                const rooms = await api.listRooms();
+                const rooms = await api.listRooms(ticket);
                 const select = document.getElementById('roomSelect');
                 select.innerHTML = '<option value="">-- select room --</option>';
                 for (const room of rooms) {

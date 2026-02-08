@@ -66,10 +66,10 @@ impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
     /// Set hostnames/IPs for self-signed certificate (dev mode).
     /// Default: ["localhost", "127.0.0.1"].
     /// Use this for LAN deployments without real TLS certs.
-    ///
+    /// 
     /// Note: Browser enforces max 14-day validity for self-signed certs.
     /// Client must fetch `/cert-hash` to trust the certificate.
-    ///
+    /// 
     /// # Example
     /// ```ignore
     /// .self_signed_hosts(["192.168.1.50", "game.local"])
@@ -80,6 +80,29 @@ impl<T: UserContext + Unpin, C: RoomConfig> ServerBuilder<T, C> {
         S: Into<String>,
     {
         self.config.self_signed_hosts = hosts.into_iter().map(|s| s.into()).collect();
+        self
+    }
+
+    /// Set JWT ticket expiry in seconds. Default: 3600 (1 hour).
+    pub fn ticket_expiry_secs(mut self, secs: u64) -> Self {
+        self.config.ticket_expiry_secs = secs;
+        self
+    }
+
+    /// Set allowed CORS origins.
+    /// If not set, derives from self_signed_hosts (http://host for each).
+    /// Use ["*"] to allow all origins (not recommended for production).
+    /// 
+    /// # Example
+    /// ```ignore
+    /// .cors_origins(["https://game.example.com", "https://staging.example.com"])
+    /// ```
+    pub fn cors_origins<I, S>(mut self, origins: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config.cors_origins = origins.into_iter().map(|s| s.into()).collect();
         self
     }
 

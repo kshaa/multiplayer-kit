@@ -62,6 +62,11 @@ pub struct ServerConfig {
     /// Hostnames/IPs for self-signed cert. Default: ["localhost", "127.0.0.1"].
     /// Only used when tls_cert is None.
     pub self_signed_hosts: Vec<String>,
+    /// JWT ticket expiry in seconds. Default: 3600 (1 hour).
+    pub ticket_expiry_secs: u64,
+    /// Allowed CORS origins. If empty, uses self_signed_hosts with http(s) prefix.
+    /// Use ["*"] to allow all origins (not recommended for production).
+    pub cors_origins: Vec<String>,
 }
 
 impl ServerConfig {
@@ -75,6 +80,8 @@ impl ServerConfig {
             tls_cert: None,
             tls_key: None,
             self_signed_hosts: vec!["localhost".to_string(), "127.0.0.1".to_string()],
+            ticket_expiry_secs: 3600, // 1 hour
+            cors_origins: vec![],     // Empty = derive from self_signed_hosts
         }
     }
 }
@@ -113,7 +120,10 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
             room_settings,
             self.handler_factory,
         ));
-        let ticket_manager = Arc::new(TicketManager::new(&self.jwt_secret));
+        let ticket_manager = Arc::new(TicketManager::new(
+            &self.jwt_secret,
+            self.config.ticket_expiry_secs,
+        ));
         let lobby = Arc::new(Lobby::new());
 
         // Load TLS identity - either from files or generate self-signed
@@ -201,10 +211,41 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
             }
         });
 
+        // Compute CORS origins
+        let cors_origins: Vec<String> = if self.config.cors_origins.is_empty() {
+            // Derive from self_signed_hosts
+            self.config
+                .self_signed_hosts
+                .iter()
+                .flat_map(|host| {
+                    vec![
+                        format!("http://{}", host),
+                        format!("https://{}", host),
+                        format!("http://{}:8080", host),
+                        format!("https://{}:8080", host),
+                    ]
+                })
+                .collect()
+        } else {
+            self.config.cors_origins.clone()
+        };
+        tracing::info!("CORS allowed origins: {:?}", cors_origins);
+
         // Start HTTP server
         let http_addr = self.config.http_addr.clone();
         let http_server = HttpServer::new(move || {
-            let cors = Cors::permissive(); // Allow all origins for dev
+            let cors = if cors_origins.iter().any(|o| o == "*") {
+                Cors::permissive()
+            } else {
+                let mut cors_builder = Cors::default()
+                    .allowed_methods(vec!["GET", "POST", "DELETE", "OPTIONS"])
+                    .allowed_headers(vec!["Authorization", "Content-Type"])
+                    .max_age(3600);
+                for origin in &cors_origins {
+                    cors_builder = cors_builder.allowed_origin(origin);
+                }
+                cors_builder
+            };
             App::new()
                 .wrap(cors)
                 .app_data(app_state.clone())

@@ -213,7 +213,7 @@ pub async fn room_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
     let user: T = state
         .ticket_manager
         .validate(ticket)
-        .map_err(|e| actix_web::error::ErrorUnauthorized(format!("{:?}", e)))?;
+        .map_err(|_| actix_web::error::ErrorUnauthorized("Invalid ticket"))?;
 
     tracing::info!(
         "WebSocket room connection for {:?} by user {:?}",

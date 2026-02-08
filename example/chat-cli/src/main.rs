@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         "/rooms" => {
-                            match api.list_rooms().await {
+                            match api.list_rooms(&ticket).await {
                                 Ok(rooms) => {
                                     if rooms.is_empty() {
                                         println!("No rooms available. Create one with /create <name>");

@@ -63,10 +63,11 @@ impl JsApiClient {
 
     /// List all available rooms.
     #[wasm_bindgen(js_name = listRooms)]
-    pub async fn list_rooms(&self) -> Result<JsValue, JsError> {
+    #[wasm_bindgen(js_name = listRooms)]
+    pub async fn list_rooms(&self, ticket: &str) -> Result<JsValue, JsError> {
         let rooms = self
             .inner
-            .list_rooms()
+            .list_rooms(ticket)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
 

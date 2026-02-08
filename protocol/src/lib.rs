@@ -168,6 +168,18 @@ pub enum RejectReason {
     Custom(String),
 }
 
+impl std::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectReason::InvalidTicket => write!(f, "Invalid or expired ticket"),
+            RejectReason::RoomNotFound => write!(f, "Room not found"),
+            RejectReason::RoomFull => write!(f, "Room is full"),
+            RejectReason::ValidationFailed(msg) => write!(f, "Validation failed: {}", msg),
+            RejectReason::Custom(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
 /// Unique identifier for a room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

@@ -108,13 +108,16 @@ mod native {
             }
         }
 
-        /// List all available rooms.
-        pub async fn list_rooms(&self) -> Result<Vec<RoomInfo>, ClientError> {
+        /// List all available rooms. Requires a valid ticket.
+        pub async fn list_rooms(&self, ticket: &str) -> Result<Vec<RoomInfo>, ClientError> {
             let url = format!("{}/rooms", self.base_url);
-            let resp =
-                self.http_client.get(&url).send().await.map_err(|e| {
-                    ClientError::Connection(ConnectionError::Transport(e.to_string()))
-                })?;
+            let resp = self
+                .http_client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", ticket))
+                .send()
+                .await
+                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -381,8 +384,8 @@ mod wasm {
         }
 
         /// List all available rooms.
-        pub async fn list_rooms(&self) -> Result<Vec<RoomInfo>, ClientError> {
-            self.fetch("GET", "/rooms", None, None).await
+        pub async fn list_rooms(&self, ticket: &str) -> Result<Vec<RoomInfo>, ClientError> {
+            self.fetch("GET", "/rooms", None, Some(ticket)).await
         }
 
         /// Create a new room with config.
@@ -493,7 +496,7 @@ mod fallback {
             )))
         }
 
-        pub async fn list_rooms(&self) -> Result<Vec<RoomInfo>, ClientError> {
+        pub async fn list_rooms(&self, _ticket: &str) -> Result<Vec<RoomInfo>, ClientError> {
             Err(ClientError::Connection(ConnectionError::Transport(
                 "No HTTP feature enabled".to_string(),
             )))

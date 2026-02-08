@@ -8,13 +8,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct TicketManager {
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
+    expiry_secs: u64,
 }
 
 impl TicketManager {
-    pub fn new(secret: &[u8]) -> Self {
+    pub fn new(secret: &[u8], expiry_secs: u64) -> Self {
         Self {
             encoding_key: EncodingKey::from_secret(secret),
             decoding_key: DecodingKey::from_secret(secret),
+            expiry_secs,
         }
     }
 
@@ -26,7 +28,7 @@ impl TicketManager {
             .as_secs();
 
         let claims = TicketClaims {
-            exp: now + 86400 * 365 * 100, // ~100 years, effectively forever
+            exp: now + self.expiry_secs,
             user,
         };
 

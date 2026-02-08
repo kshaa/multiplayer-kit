@@ -72,7 +72,7 @@ pub async fn issue_ticket<T: UserContext, C: RoomConfig>(
         Ok(user) => user,
         Err(reason) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
-                error: format!("{:?}", reason),
+                error: reason.to_string(),
             });
         }
     };
@@ -187,10 +187,27 @@ pub async fn delete_room<T: UserContext, C: RoomConfig>(
     }
 }
 
-/// GET /rooms - List all rooms.
+/// GET /rooms - List all rooms (requires authentication).
 pub async fn list_rooms<T: UserContext, C: RoomConfig>(
+    req: HttpRequest,
     state: web::Data<AppState<T, C>>,
 ) -> HttpResponse {
+    let ticket = match extract_ticket(&req) {
+        Some(t) => t,
+        None => {
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "Missing Authorization header".to_string(),
+            });
+        }
+    };
+
+    // Validate ticket (we don't need the user, just verify it's valid)
+    if state.ticket_manager.validate::<T>(ticket).is_err() {
+        return HttpResponse::Unauthorized().json(ErrorResponse {
+            error: "Invalid ticket".to_string(),
+        });
+    }
+
     let rooms = state.room_manager.get_all_rooms();
     HttpResponse::Ok().json(rooms)
 }
