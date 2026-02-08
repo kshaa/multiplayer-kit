@@ -464,7 +464,6 @@ impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
                 id: room_id,
                 name: entry.config.name().to_string(),
                 player_count,
-                min_players: entry.config.min_players() as u32,
                 max_players,
                 is_joinable,
                 created_at: entry.created_at_unix,

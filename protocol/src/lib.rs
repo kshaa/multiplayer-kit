@@ -23,11 +23,6 @@ pub trait RoomConfig:
         Ok(())
     }
 
-    /// Minimum players for matchmaking/game start. Default: 1
-    fn min_players(&self) -> usize {
-        1
-    }
-
     /// Maximum players allowed. Default: None (unlimited)
     fn max_players(&self) -> Option<usize> {
         None
@@ -191,7 +186,6 @@ pub struct RoomInfo<C = serde_json::Value> {
     pub id: RoomId,
     pub name: String,
     pub player_count: u32,
-    pub min_players: u32,
     pub max_players: Option<u32>,
     pub is_joinable: bool,
     pub created_at: u64,
@@ -206,7 +200,6 @@ impl<C> RoomInfo<C> {
             id: self.id,
             name: self.name,
             player_count: self.player_count,
-            min_players: self.min_players,
             max_players: self.max_players,
             is_joinable: self.is_joinable,
             created_at: self.created_at,
