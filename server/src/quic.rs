@@ -6,22 +6,23 @@
 use crate::lobby::Lobby;
 use crate::room::RoomManager;
 use crate::ticket::TicketManager;
+use crate::GameServerContext;
 use multiplayer_kit_protocol::{ChannelId, LobbyEvent, RoomConfig, RoomId, UserContext};
 use std::sync::Arc;
 use wtransport::Connection;
 use wtransport::endpoint::IncomingSession;
 
 /// Shared state for QUIC handlers.
-pub struct QuicState<T: UserContext, C: RoomConfig> {
-    pub room_manager: Arc<RoomManager<T, C>>,
+pub struct QuicState<T: UserContext, C: RoomConfig, Ctx: GameServerContext> {
+    pub room_manager: Arc<RoomManager<T, C, Ctx>>,
     pub ticket_manager: Arc<TicketManager>,
     pub lobby: Arc<Lobby>,
 }
 
 /// Handle an incoming WebTransport session.
-pub async fn handle_session<T: UserContext, C: RoomConfig>(
+pub async fn handle_session<T: UserContext, C: RoomConfig, Ctx: GameServerContext>(
     incoming: IncomingSession,
-    state: Arc<QuicState<T, C>>,
+    state: Arc<QuicState<T, C, Ctx>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let session_request = incoming.await?;
     let path = session_request.path().to_string();
@@ -86,10 +87,10 @@ pub async fn handle_session<T: UserContext, C: RoomConfig>(
 }
 
 /// Handle a lobby WebTransport connection (already authenticated via query param).
-async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
+async fn handle_lobby_connection<T: UserContext, C: RoomConfig, Ctx: GameServerContext>(
     connection: Connection,
     user: T,
-    state: Arc<QuicState<T, C>>,
+    state: Arc<QuicState<T, C, Ctx>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Open a unidirectional stream to send lobby events
     let mut send_stream = connection.open_uni().await?.await?;
@@ -132,11 +133,11 @@ async fn handle_lobby_connection<T: UserContext, C: RoomConfig>(
 /// 1. Client connects with ticket in query param
 /// 2. Server validates before accepting
 /// 3. Each bi-stream client opens becomes a channel
-async fn handle_room_connection<T: UserContext, C: RoomConfig>(
+async fn handle_room_connection<T: UserContext, C: RoomConfig, Ctx: GameServerContext>(
     connection: Connection,
     room_id: RoomId,
     user: T,
-    state: Arc<QuicState<T, C>>,
+    state: Arc<QuicState<T, C, Ctx>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Track active channel tasks
     let mut channel_tasks: Vec<(ChannelId, tokio::task::JoinHandle<()>)> = Vec::new();

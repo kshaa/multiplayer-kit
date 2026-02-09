@@ -4,6 +4,8 @@
 //! Each channel has its own message type, identified on first message.
 
 #[cfg(feature = "server")]
+use multiplayer_kit_server::GameServerContext;
+#[cfg(feature = "server")]
 use std::future::Future;
 #[cfg(feature = "server")]
 use std::pin::Pin;
@@ -113,20 +115,36 @@ mod server {
     }
 
     /// Context for server-side typed actor.
-    pub struct TypedContext<T: UserContext, P: TypedProtocol> {
+    ///
+    /// Provides access to room operations and the game context for game-specific services.
+    pub struct TypedContext<T: UserContext, P: TypedProtocol, Ctx: GameServerContext = ()> {
         room_id: RoomId,
         /// Sender to deliver events back to self.
         self_tx: mpsc::Sender<P::Event>,
         handle: multiplayer_kit_server::RoomHandle<T>,
         /// Maps channel_id -> (user, channel_type)
         user_channels: Arc<DashMap<ChannelId, (T, P::Channel)>>,
+        /// Game context for game-specific services.
+        game_context: Arc<Ctx>,
         _phantom: PhantomData<P>,
     }
 
-    impl<T: UserContext, P: TypedProtocol> TypedContext<T, P> {
+    impl<T: UserContext, P: TypedProtocol, Ctx: GameServerContext> TypedContext<T, P, Ctx> {
         /// Get the room ID.
         pub fn room_id(&self) -> RoomId {
             self.room_id
+        }
+
+        /// Get the game context for accessing game-specific services.
+        ///
+        /// # Example
+        ///
+        /// ```ignore
+        /// let ctx = ctx.game_context();
+        /// ctx.history_manager.record_event(&event).await;
+        /// ```
+        pub fn game_context(&self) -> &Arc<Ctx> {
+            &self.game_context
         }
 
         /// Broadcast event to all channels of the event's type.
@@ -179,13 +197,14 @@ mod server {
         }
     }
 
-    impl<T: UserContext, P: TypedProtocol> Clone for TypedContext<T, P> {
+    impl<T: UserContext, P: TypedProtocol, Ctx: GameServerContext> Clone for TypedContext<T, P, Ctx> {
         fn clone(&self) -> Self {
             Self {
                 room_id: self.room_id,
                 self_tx: self.self_tx.clone(),
                 handle: self.handle.clone(),
                 user_channels: self.user_channels.clone(),
+                game_context: self.game_context.clone(),
                 _phantom: PhantomData,
             }
         }
@@ -205,42 +224,66 @@ mod server {
     /// Wrap a typed actor function for the server.
     ///
     /// The actor function receives:
-    /// - `TypedContext<T, P>` for sending messages
+    /// - `TypedContext<T, P, Ctx>` for sending messages and accessing game context
     /// - `TypedEvent<T, P>` the current event
     /// - `Arc<C>` the room config (shared, immutable)
-    pub fn with_typed_actor<T, P, C, F, Fut>(
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// .room_handler(with_typed_actor::<
+    ///     MyUser,
+    ///     MyProtocol,
+    ///     MyRoomConfig,
+    ///     MyGameContext,
+    ///     _,
+    ///     _,
+    /// >(my_actor))
+    /// ```
+    pub fn with_typed_actor<T, P, C, Ctx, F, Fut>(
         actor_fn: F,
-    ) -> impl Fn(multiplayer_kit_server::Room<T>, C) -> Pin<Box<dyn Future<Output = ()> + Send>>
-    + Send
-    + Sync
-    + Clone
-    + 'static
+    ) -> impl Fn(
+        multiplayer_kit_server::Room<T>,
+        C,
+        Arc<Ctx>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>
+           + Send
+           + Sync
+           + Clone
+           + 'static
     where
         T: UserContext,
         P: TypedProtocol,
         C: multiplayer_kit_protocol::RoomConfig + 'static,
-        F: Fn(TypedContext<T, P>, TypedEvent<T, P>, Arc<C>) -> Fut + Send + Sync + Clone + 'static,
+        Ctx: GameServerContext,
+        F: Fn(TypedContext<T, P, Ctx>, TypedEvent<T, P>, Arc<C>) -> Fut
+            + Send
+            + Sync
+            + Clone
+            + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let actor_fn = Arc::new(actor_fn);
-        move |room: multiplayer_kit_server::Room<T>, config: C| {
+        move |room: multiplayer_kit_server::Room<T>, config: C, ctx: Arc<Ctx>| {
             let actor_fn = Arc::clone(&actor_fn);
             Box::pin(async move {
-                run_typed_server_actor::<T, P, C, F, Fut>(room, config, actor_fn).await;
+                run_typed_server_actor::<T, P, C, Ctx, F, Fut>(room, config, ctx, actor_fn).await;
             })
         }
     }
 
     /// Internal: run the typed server actor loop.
-    async fn run_typed_server_actor<T, P, C, F, Fut>(
+    async fn run_typed_server_actor<T, P, C, Ctx, F, Fut>(
         mut room: multiplayer_kit_server::Room<T>,
         config: C,
+        game_context: Arc<Ctx>,
         actor_fn: Arc<F>,
     ) where
         T: UserContext,
         P: TypedProtocol,
         C: multiplayer_kit_protocol::RoomConfig + 'static,
-        F: Fn(TypedContext<T, P>, TypedEvent<T, P>, Arc<C>) -> Fut + Send + Sync + 'static,
+        Ctx: GameServerContext,
+        F: Fn(TypedContext<T, P, Ctx>, TypedEvent<T, P>, Arc<C>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let config = Arc::new(config);
@@ -261,6 +304,7 @@ mod server {
             self_tx,
             handle: room.handle(),
             user_channels: user_channels.clone(),
+            game_context,
             _phantom: PhantomData,
         };
 

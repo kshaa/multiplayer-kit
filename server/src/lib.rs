@@ -25,20 +25,75 @@ use wtransport::Identity;
 use wtransport::ServerConfig as WtServerConfig;
 use wtransport::tls::Sha256DigestFmt;
 
+// ============================================================================
+// GameServerContext - inject game-specific services
+// ============================================================================
+
+/// Context trait for game-specific services.
+///
+/// Implement this trait on your context type to provide game-specific
+/// services (database pools, history managers, metrics, etc.) throughout
+/// the game server.
+///
+/// The context is passed to:
+/// - Auth handlers (for external service lookups)
+/// - Room handlers (for persisting game state/results)
+/// - Typed actors via `TypedContext::game_context()`
+///
+/// # Example
+///
+/// ```ignore
+/// struct MyGameContext {
+///     db: Pool<Postgres>,
+///     history: HistoryManager,
+///     metrics: MetricsRecorder,
+/// }
+///
+/// impl GameServerContext for MyGameContext {}
+///
+/// // Use in server:
+/// let ctx = MyGameContext { ... };
+/// Server::<MyUser, MyConfig, MyGameContext>::builder()
+///     .context(ctx)
+///     .auth_handler(|req, ctx| async move {
+///         // ctx.db is available here
+///         Ok(user)
+///     })
+///     .room_handler(|room, config, ctx| async move {
+///         // ctx.history is available here
+///     })
+///     .build()
+/// ```
+pub trait GameServerContext: Send + Sync + 'static {}
+
+/// Default implementation for unit type (no context needed).
+impl GameServerContext for () {}
+
 pub use builder::ServerBuilder;
 pub use error::ServerError;
 pub use multiplayer_kit_protocol::{ChannelId, RoomId, SimpleConfig};
 pub use room::{Accept, ChannelError, Room, RoomHandle, ServerChannel};
 
+// Re-export GameServerContext for convenience
+// (it's defined at the top of this module)
+
+/// Type alias for auth handler boxed future with game context.
+pub type AuthFutureWithContext<T> = Pin<Box<dyn Future<Output = Result<T, RejectReason>> + Send>>;
+
 /// Type alias for auth handler boxed future.
 pub type AuthFuture<T> = Pin<Box<dyn Future<Output = Result<T, RejectReason>> + Send>>;
 
-/// The main server struct, generic over user context and room config.
-pub struct Server<T: UserContext + Unpin, C: RoomConfig = SimpleConfig> {
+/// The main server struct, generic over user context, room config, and game context.
+///
+/// The `Ctx` type parameter allows games to inject their own services (database pools,
+/// history managers, etc.) that are available throughout the server.
+pub struct Server<T: UserContext + Unpin, C: RoomConfig = SimpleConfig, Ctx: GameServerContext = ()>
+{
     config: ServerConfig,
-    auth_handler: Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>,
-    handler_factory: RoomHandlerFactory<T, C>,
+    auth_handler: Arc<dyn Fn(AuthRequest, Arc<Ctx>) -> AuthFuture<T> + Send + Sync>,
+    handler_factory: RoomHandlerFactory<T, C, Ctx>,
     jwt_secret: Vec<u8>,
+    context: Arc<Ctx>,
     _phantom: PhantomData<(T, C)>,
 }
 
@@ -101,9 +156,11 @@ pub struct AuthRequest {
     pub body: Option<Vec<u8>>,
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext>
+    Server<T, C, Ctx>
+{
     /// Create a new server builder.
-    pub fn builder() -> ServerBuilder<T, C> {
+    pub fn builder() -> ServerBuilder<T, C, Ctx> {
         ServerBuilder::new()
     }
 
@@ -122,9 +179,10 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
             empty_timeout: Duration::from_secs(self.config.room_empty_timeout_secs),
         };
 
-        let room_manager = Arc::new(RoomManager::<T, C>::new(
+        let room_manager = Arc::new(RoomManager::<T, C, Ctx>::new(
             room_settings,
             self.handler_factory,
+            Arc::clone(&self.context),
         ));
         let ticket_manager = Arc::new(TicketManager::new(
             &self.jwt_secret,
@@ -189,6 +247,7 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
             lobby: Arc::clone(&lobby),
             auth_handler: Arc::clone(&self.auth_handler),
             cert_hash: Arc::clone(&cert_hash),
+            context: Arc::clone(&self.context),
         });
 
         // WebSocket state
@@ -260,15 +319,15 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Server<T, C> {
                 .wrap(cors)
                 .app_data(app_state.clone())
                 .app_data(ws_state.clone())
-                .route("/ticket", web::post().to(rest::issue_ticket::<T, C>))
-                .route("/rooms", web::post().to(rest::create_room::<T, C>))
-                .route("/rooms", web::get().to(rest::list_rooms::<T, C>))
-                .route("/rooms/{id}", web::delete().to(rest::delete_room::<T, C>))
-                .route("/quickplay", web::post().to(rest::quickplay::<T, C>))
-                .route("/cert-hash", web::get().to(rest::get_cert_hash::<T, C>))
+                .route("/ticket", web::post().to(rest::issue_ticket::<T, C, Ctx>))
+                .route("/rooms", web::post().to(rest::create_room::<T, C, Ctx>))
+                .route("/rooms", web::get().to(rest::list_rooms::<T, C, Ctx>))
+                .route("/rooms/{id}", web::delete().to(rest::delete_room::<T, C, Ctx>))
+                .route("/quickplay", web::post().to(rest::quickplay::<T, C, Ctx>))
+                .route("/cert-hash", web::get().to(rest::get_cert_hash::<T, C, Ctx>))
                 // WebSocket endpoints
-                .route("/ws/room/{id}", web::get().to(ws::room_ws::<T, C>))
-                .route("/ws/lobby", web::get().to(ws::lobby_ws::<T, C>))
+                .route("/ws/room/{id}", web::get().to(ws::room_ws::<T, C, Ctx>))
+                .route("/ws/lobby", web::get().to(ws::lobby_ws::<T, C, Ctx>))
         });
 
         // Bind with or without TLS

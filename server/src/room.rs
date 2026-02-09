@@ -4,6 +4,7 @@
 //! The actor pattern is optional and lives in helpers.
 
 use crate::lobby::Lobby;
+use crate::GameServerContext;
 use dashmap::DashMap;
 use multiplayer_kit_protocol::{ChannelId, RoomConfig, RoomId, RoomInfo, UserContext};
 use std::collections::HashSet;
@@ -15,9 +16,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, mpsc, oneshot};
 
 /// Type alias for the room handler factory function.
-/// Now receives both the Room and the config.
-pub type RoomHandlerFactory<T, C> =
-    Arc<dyn Fn(Room<T>, C) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+/// Receives the Room, config, and game context.
+pub type RoomHandlerFactory<T, C, Ctx> =
+    Arc<dyn Fn(Room<T>, C, Arc<Ctx>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 // ============================================================================
 // ServerChannel - bidirectional channel to a single client
@@ -234,11 +235,12 @@ impl<T: UserContext> RoomShared<T> {
 // ============================================================================
 
 /// Manages all active rooms.
-pub struct RoomManager<T: UserContext, C: RoomConfig> {
+pub struct RoomManager<T: UserContext, C: RoomConfig, Ctx: GameServerContext> {
     rooms: DashMap<RoomId, RoomEntry<T, C>>,
     next_room_id: AtomicU64,
     settings: RoomSettings,
-    handler_factory: RoomHandlerFactory<T, C>,
+    handler_factory: RoomHandlerFactory<T, C, Ctx>,
+    context: Arc<Ctx>,
 }
 
 /// Internal room entry with control handles.
@@ -269,13 +271,18 @@ pub struct RoomSettings {
     pub empty_timeout: Duration,
 }
 
-impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
-    pub fn new(settings: RoomSettings, handler_factory: RoomHandlerFactory<T, C>) -> Self {
+impl<T: UserContext, C: RoomConfig, Ctx: GameServerContext> RoomManager<T, C, Ctx> {
+    pub fn new(
+        settings: RoomSettings,
+        handler_factory: RoomHandlerFactory<T, C, Ctx>,
+        context: Arc<Ctx>,
+    ) -> Self {
         Self {
             rooms: DashMap::new(),
             next_room_id: AtomicU64::new(1),
             settings,
             handler_factory,
+            context,
         }
     }
 
@@ -323,8 +330,8 @@ impl<T: UserContext, C: RoomConfig> RoomManager<T, C> {
         };
         self.rooms.insert(id, entry);
 
-        // Spawn handler with config
-        let handler_future = (self.handler_factory)(room, config);
+        // Spawn handler with config and context
+        let handler_future = (self.handler_factory)(room, config, Arc::clone(&self.context));
         tokio::spawn(handler_future);
 
         Ok(id)

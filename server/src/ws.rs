@@ -6,6 +6,7 @@
 use crate::lobby::Lobby;
 use crate::room::RoomManager;
 use crate::ticket::TicketManager;
+use crate::GameServerContext;
 use actix::{Actor, ActorContext, AsyncContext, Handler, Message, StreamHandler};
 use actix_web::{HttpRequest, HttpResponse, web};
 use actix_web_actors::ws;
@@ -18,17 +19,17 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shared state for WebSocket handlers.
-pub struct WsState<T: UserContext, C: RoomConfig> {
-    pub room_manager: Arc<RoomManager<T, C>>,
+pub struct WsState<T: UserContext, C: RoomConfig, Ctx: GameServerContext> {
+    pub room_manager: Arc<RoomManager<T, C, Ctx>>,
     pub ticket_manager: Arc<TicketManager>,
     pub lobby: Arc<Lobby>,
 }
 
 /// WebSocket actor for a room channel.
-pub struct RoomWsActor<T: UserContext + 'static, C: RoomConfig + 'static> {
+pub struct RoomWsActor<T: UserContext + 'static, C: RoomConfig + 'static, Ctx: GameServerContext> {
     room_id: RoomId,
     user_id: T::Id,
-    room_manager: Arc<RoomManager<T, C>>,
+    room_manager: Arc<RoomManager<T, C, Ctx>>,
     lobby: Arc<Lobby>,
     /// Channel ID (set after channel opens).
     channel_id: Option<ChannelId>,
@@ -51,11 +52,13 @@ pub struct RoomMessage(pub Vec<u8>);
 #[rtype(result = "()")]
 pub struct ChannelClosed;
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> RoomWsActor<T, C> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext>
+    RoomWsActor<T, C, Ctx>
+{
     pub fn new(
         room_id: RoomId,
         user_id: T::Id,
-        room_manager: Arc<RoomManager<T, C>>,
+        room_manager: Arc<RoomManager<T, C, Ctx>>,
         lobby: Arc<Lobby>,
         channel_id: ChannelId,
         read_tx: mpsc::Sender<Vec<u8>>,
@@ -113,7 +116,9 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> RoomWsActor<T, C
     }
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Actor for RoomWsActor<T, C> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext> Actor
+    for RoomWsActor<T, C, Ctx>
+{
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
@@ -146,8 +151,8 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Actor for RoomWs
     }
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<RoomMessage>
-    for RoomWsActor<T, C>
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext>
+    Handler<RoomMessage> for RoomWsActor<T, C, Ctx>
 {
     type Result = ();
 
@@ -156,8 +161,8 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<RoomMess
     }
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<ChannelClosed>
-    for RoomWsActor<T, C>
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext>
+    Handler<ChannelClosed> for RoomWsActor<T, C, Ctx>
 {
     type Result = ();
 
@@ -166,8 +171,8 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<ChannelC
     }
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>
-    StreamHandler<Result<ws::Message, ws::ProtocolError>> for RoomWsActor<T, C>
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext>
+    StreamHandler<Result<ws::Message, ws::ProtocolError>> for RoomWsActor<T, C, Ctx>
 {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         match msg {
@@ -207,12 +212,12 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>
 }
 
 /// HTTP handler to upgrade to WebSocket for room channels.
-pub async fn room_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
+pub async fn room_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext>(
     req: HttpRequest,
     stream: web::Payload,
     path: web::Path<(u64,)>,
     query: web::Query<WsQuery>,
-    state: web::Data<WsState<T, C>>,
+    state: web::Data<WsState<T, C, Ctx>>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let room_id = RoomId(path.0);
     let ticket = &query.ticket;
@@ -271,9 +276,9 @@ use multiplayer_kit_protocol::LobbyEvent;
 use tokio::sync::broadcast;
 
 /// WebSocket actor for lobby updates.
-pub struct LobbyWsActor<T: UserContext + 'static, C: RoomConfig + 'static> {
+pub struct LobbyWsActor<T: UserContext + 'static, C: RoomConfig + 'static, Ctx: GameServerContext> {
     user_id: T::Id,
-    room_manager: Arc<RoomManager<T, C>>,
+    room_manager: Arc<RoomManager<T, C, Ctx>>,
     lobby_rx: Option<broadcast::Receiver<LobbyEvent>>,
     last_heartbeat: Instant,
 }
@@ -283,10 +288,12 @@ pub struct LobbyWsActor<T: UserContext + 'static, C: RoomConfig + 'static> {
 #[rtype(result = "()")]
 pub struct LobbyMessage(pub Vec<u8>);
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> LobbyWsActor<T, C> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext>
+    LobbyWsActor<T, C, Ctx>
+{
     pub fn new(
         user_id: T::Id,
-        room_manager: Arc<RoomManager<T, C>>,
+        room_manager: Arc<RoomManager<T, C, Ctx>>,
         lobby_rx: broadcast::Receiver<LobbyEvent>,
     ) -> Self {
         Self {
@@ -334,7 +341,9 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> LobbyWsActor<T, 
     }
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Actor for LobbyWsActor<T, C> {
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext> Actor
+    for LobbyWsActor<T, C, Ctx>
+{
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
@@ -351,8 +360,8 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Actor for LobbyW
     }
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<LobbyMessage>
-    for LobbyWsActor<T, C>
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext>
+    Handler<LobbyMessage> for LobbyWsActor<T, C, Ctx>
 {
     type Result = ();
 
@@ -361,8 +370,8 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static> Handler<LobbyMes
     }
 }
 
-impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>
-    StreamHandler<Result<ws::Message, ws::ProtocolError>> for LobbyWsActor<T, C>
+impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext>
+    StreamHandler<Result<ws::Message, ws::ProtocolError>> for LobbyWsActor<T, C, Ctx>
 {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         match msg {
@@ -383,11 +392,11 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>
 }
 
 /// HTTP handler to upgrade to WebSocket for lobby.
-pub async fn lobby_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static>(
+pub async fn lobby_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerContext>(
     req: HttpRequest,
     stream: web::Payload,
     query: web::Query<WsQuery>,
-    state: web::Data<WsState<T, C>>,
+    state: web::Data<WsState<T, C, Ctx>>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let ticket = &query.ticket;
 

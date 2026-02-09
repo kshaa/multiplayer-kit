@@ -3,19 +3,20 @@
 use crate::lobby::Lobby;
 use crate::room::RoomManager;
 use crate::ticket::TicketManager;
-use crate::{AuthFuture, AuthRequest};
+use crate::{AuthFuture, AuthRequest, GameServerContext};
 use actix_web::{HttpRequest, HttpResponse, web};
 use multiplayer_kit_protocol::{QuickplayResponse, RoomConfig, RoomId, UserContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Shared application state for REST handlers.
-pub struct AppState<T: UserContext, C: RoomConfig> {
-    pub room_manager: Arc<RoomManager<T, C>>,
+pub struct AppState<T: UserContext, C: RoomConfig, Ctx: GameServerContext> {
+    pub room_manager: Arc<RoomManager<T, C, Ctx>>,
     pub ticket_manager: Arc<TicketManager>,
     pub lobby: Arc<Lobby>,
-    pub auth_handler: Arc<dyn Fn(AuthRequest) -> AuthFuture<T> + Send + Sync>,
+    pub auth_handler: Arc<dyn Fn(AuthRequest, Arc<Ctx>) -> AuthFuture<T> + Send + Sync>,
     pub cert_hash: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub context: Arc<Ctx>,
 }
 
 #[derive(Serialize)]
@@ -42,10 +43,10 @@ fn extract_ticket(req: &HttpRequest) -> Option<&str> {
 }
 
 /// POST /ticket - Issue a new JWT ticket.
-pub async fn issue_ticket<T: UserContext, C: RoomConfig>(
+pub async fn issue_ticket<T: UserContext, C: RoomConfig, Ctx: GameServerContext>(
     req: HttpRequest,
     body: web::Bytes,
-    state: web::Data<AppState<T, C>>,
+    state: web::Data<AppState<T, C, Ctx>>,
 ) -> HttpResponse {
     // Extract headers
     let headers = req
@@ -67,8 +68,8 @@ pub async fn issue_ticket<T: UserContext, C: RoomConfig>(
         },
     };
 
-    // Call user's auth handler
-    let user = match (state.auth_handler)(auth_request).await {
+    // Call user's auth handler with game context
+    let user = match (state.auth_handler)(auth_request, Arc::clone(&state.context)).await {
         Ok(user) => user,
         Err(reason) => {
             return HttpResponse::Unauthorized().json(ErrorResponse {
@@ -89,10 +90,10 @@ pub async fn issue_ticket<T: UserContext, C: RoomConfig>(
 /// POST /rooms - Create a new room.
 /// Body should be JSON matching the room config type C.
 /// If C: Default and body is empty/`{}`, uses default config.
-pub async fn create_room<T: UserContext, C: RoomConfig>(
+pub async fn create_room<T: UserContext, C: RoomConfig, Ctx: GameServerContext>(
     req: HttpRequest,
     body: web::Bytes,
-    state: web::Data<AppState<T, C>>,
+    state: web::Data<AppState<T, C, Ctx>>,
 ) -> HttpResponse {
     let ticket = match extract_ticket(&req) {
         Some(t) => t,
@@ -149,10 +150,10 @@ pub async fn create_room<T: UserContext, C: RoomConfig>(
 }
 
 /// DELETE /rooms/{id} - Delete a room (creator only).
-pub async fn delete_room<T: UserContext, C: RoomConfig>(
+pub async fn delete_room<T: UserContext, C: RoomConfig, Ctx: GameServerContext>(
     req: HttpRequest,
     path: web::Path<u64>,
-    state: web::Data<AppState<T, C>>,
+    state: web::Data<AppState<T, C, Ctx>>,
 ) -> HttpResponse {
     let room_id = RoomId(*path);
 
@@ -188,9 +189,9 @@ pub async fn delete_room<T: UserContext, C: RoomConfig>(
 }
 
 /// GET /rooms - List all rooms (requires authentication).
-pub async fn list_rooms<T: UserContext, C: RoomConfig>(
+pub async fn list_rooms<T: UserContext, C: RoomConfig, Ctx: GameServerContext>(
     req: HttpRequest,
-    state: web::Data<AppState<T, C>>,
+    state: web::Data<AppState<T, C, Ctx>>,
 ) -> HttpResponse {
     let ticket = match extract_ticket(&req) {
         Some(t) => t,
@@ -220,10 +221,10 @@ pub struct QuickplayRequest {
     pub filter: serde_json::Value,
 }
 
-pub async fn quickplay<T: UserContext, C: RoomConfig>(
+pub async fn quickplay<T: UserContext, C: RoomConfig, Ctx: GameServerContext>(
     req: HttpRequest,
     body: web::Bytes,
-    state: web::Data<AppState<T, C>>,
+    state: web::Data<AppState<T, C, Ctx>>,
 ) -> HttpResponse {
     let ticket = match extract_ticket(&req) {
         Some(t) => t,
@@ -290,8 +291,8 @@ pub async fn quickplay<T: UserContext, C: RoomConfig>(
 }
 
 /// GET /cert-hash - Get the server's certificate hash for WebTransport.
-pub async fn get_cert_hash<T: UserContext, C: RoomConfig>(
-    state: web::Data<AppState<T, C>>,
+pub async fn get_cert_hash<T: UserContext, C: RoomConfig, Ctx: GameServerContext>(
+    state: web::Data<AppState<T, C, Ctx>>,
 ) -> HttpResponse {
     let hash = state.cert_hash.read().await;
     match hash.as_ref() {
