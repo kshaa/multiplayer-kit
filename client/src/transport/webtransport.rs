@@ -288,10 +288,7 @@ mod wasm {
                     ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
                 })?;
 
-            Ok(WebTransportStream {
-                stream,
-                connected: Rc::new(RefCell::new(true)),
-            })
+            Ok(WebTransportStream::new(stream))
         }
 
         /// Accept a unidirectional receive stream (for lobby).
@@ -348,22 +345,28 @@ mod wasm {
     /// A bidirectional WebTransport stream.
     pub struct WebTransportStream {
         stream: wt::WebTransportBidirectionalStream,
+        reader: web_sys::ReadableStreamDefaultReader,
         connected: Rc<RefCell<bool>>,
     }
 
     impl WebTransportStream {
-        pub async fn read(&self, buf: &mut [u8]) -> Result<usize, ClientError> {
-            let readable: web_sys::ReadableStream = self.stream.readable().unchecked_into();
+        fn new(stream: wt::WebTransportBidirectionalStream) -> Self {
+            let readable: web_sys::ReadableStream = stream.readable().unchecked_into();
             let reader = readable
                 .get_reader()
                 .unchecked_into::<web_sys::ReadableStreamDefaultReader>();
+            Self {
+                stream,
+                reader,
+                connected: Rc::new(RefCell::new(true)),
+            }
+        }
 
-            let result = JsFuture::from(reader.read()).await.map_err(|e| {
+        pub async fn read(&self, buf: &mut [u8]) -> Result<usize, ClientError> {
+            let result = JsFuture::from(self.reader.read()).await.map_err(|e| {
                 *self.connected.borrow_mut() = false;
                 ClientError::Receive(ReceiveError::Stream(format!("{:?}", e)))
             })?;
-
-            reader.release_lock();
 
             let result_obj: js_sys::Object = result.unchecked_into();
             let done = js_sys::Reflect::get(&result_obj, &"done".into())

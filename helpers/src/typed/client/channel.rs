@@ -81,21 +81,13 @@ async fn open_and_run_channel<P: TypedProtocol, S: Spawner>(
 }
 
 // ============================================================================
-// Unified channel runner
+// Unified channel runner (single implementation for both platforms)
 // ============================================================================
-
-/// Result of selecting between read and write operations.
-enum ChannelSelect {
-    /// Read completed with data (owned buffer and length).
-    Read(Result<(Vec<u8>, usize), multiplayer_kit_client::ClientError>),
-    /// Write request received.
-    Write(Option<Vec<u8>>),
-}
 
 /// Run a single channel's read/write loop.
 ///
-/// Uses the `ChannelIO` trait for I/O operations.
-async fn run_channel<P: TypedProtocol, C: ChannelIO>(
+/// Uses `futures::select` for concurrent read/write handling.
+async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static>(
     channel: C,
     channel_type: P::Channel,
     channel_id_byte: u8,
@@ -112,55 +104,54 @@ async fn run_channel<P: TypedProtocol, C: ChannelIO>(
     let mut buffer = MessageBuffer::new();
 
     loop {
-        // Select between read and write
-        let selection = {
-            let read_fut = async {
-                let mut buf = vec![0u8; 64 * 1024];
-                let result = channel.read(&mut buf).await;
-                ChannelSelect::Read(result.map(|n| (buf, n)))
-            };
-            let write_fut = async { ChannelSelect::Write(write_rx.recv().await) };
-            futures::pin_mut!(read_fut, write_fut);
-            match futures::future::select(read_fut, write_fut).await {
-                futures::future::Either::Left((result, _)) => result,
-                futures::future::Either::Right((result, _)) => result,
-            }
+        let read_fut = async {
+            let mut buf = vec![0u8; 64 * 1024];
+            let result = channel.read(&mut buf).await;
+            (buf, result)
         };
+        let write_fut = write_rx.recv();
 
-        match selection {
-            ChannelSelect::Read(read_result) => match read_result {
-                Ok((buf, n)) if n > 0 => {
-                    for result in buffer.push(&buf[..n]) {
-                        match result {
-                            Ok(data) => match P::decode(channel_type, &data) {
-                                Ok(event) => {
-                                    let _ = event_tx.send(InternalEvent::Message(event));
-                                }
+        futures::pin_mut!(read_fut, write_fut);
+
+        match futures::future::select(read_fut, write_fut).await {
+            // Read completed first
+            futures::future::Either::Left(((buf, result), _pending_write)) => {
+                match result {
+                    Ok(n) if n > 0 => {
+                        for result in buffer.push(&buf[..n]) {
+                            match result {
+                                Ok(data) => match P::decode(channel_type, &data) {
+                                    Ok(event) => {
+                                        let _ = event_tx.send(InternalEvent::Message(event));
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Decode error: {}", e);
+                                    }
+                                },
                                 Err(e) => {
-                                    tracing::warn!("Decode error: {}", e);
+                                    tracing::warn!("Framing error: {}", e);
+                                    let _ = event_tx.send(InternalEvent::Disconnected);
+                                    return;
                                 }
-                            },
-                            Err(e) => {
-                                tracing::warn!("Framing error: {}", e);
-                                let _ = event_tx.send(InternalEvent::Disconnected);
-                                return;
                             }
                         }
                     }
-                }
-                _ => {
-                    let _ = event_tx.send(InternalEvent::Disconnected);
-                    return;
-                }
-            },
-            ChannelSelect::Write(write_data) => {
-                if let Some(data) = write_data {
-                    if channel.write(&data).await.is_err() {
+                    _ => {
                         let _ = event_tx.send(InternalEvent::Disconnected);
                         return;
                     }
-                } else {
-                    return;
+                }
+            }
+            // Write request received first
+            futures::future::Either::Right((write_data, _pending_read)) => {
+                match write_data {
+                    Some(data) => {
+                        if channel.write(&data).await.is_err() {
+                            let _ = event_tx.send(InternalEvent::Disconnected);
+                            return;
+                        }
+                    }
+                    None => return,
                 }
             }
         }

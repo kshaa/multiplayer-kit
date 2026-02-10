@@ -265,12 +265,12 @@
 
         async function connectLobby() {
             try {
-                lobbyClient = await JsLobbyClient.connectAuto(
-                    SERVER_WT,
-                    SERVER_WS,
-                    ticket,
-                    certHash
-                );
+                lobbyClient = await JsLobbyClient.connect({
+                    url: SERVER_WT,
+                    ticket: ticket,
+                    certHash: certHash,
+                    transport: 'auto'
+                });
                 log('lobby connected (live updates)', true);
                 runLobbyLoop();
             } catch (e) {
@@ -420,13 +420,13 @@
 
         async function connectToRoom(roomId) {
             // Connect via JsRoomConnection (auto-detects WebTransport/WebSocket)
-            const conn = await JsRoomConnection.connectAuto(
-                SERVER_WT,
-                SERVER_WS,
-                ticket,
-                roomId,
-                certHash
-            );
+            const conn = await JsRoomConnection.connect({
+                url: SERVER_WT,
+                ticket: ticket,
+                roomId: roomId,
+                certHash: certHash,
+                transport: 'auto'
+            });
 
             console.log(`Using ${conn.transport} transport`);
             inRoom = true;

@@ -33,22 +33,22 @@ impl GameClientContext for CliAdapter {}
 
 impl ChatClientAdapter for CliAdapter {
     fn on_connected(&self) {
-        let _ = self.ui_tx.blocking_send(UiEvent::Connected);
+        let _ = self.ui_tx.try_send(UiEvent::Connected);
     }
 
     fn on_disconnected(&self) {
-        let _ = self.ui_tx.blocking_send(UiEvent::Disconnected);
+        let _ = self.ui_tx.try_send(UiEvent::Disconnected);
     }
 
     fn on_text_message(&self, username: &str, content: &str) {
-        let _ = self.ui_tx.blocking_send(UiEvent::TextMessage(
+        let _ = self.ui_tx.try_send(UiEvent::TextMessage(
             username.to_string(),
             content.to_string(),
         ));
     }
 
     fn on_system_message(&self, text: &str) {
-        let _ = self.ui_tx.blocking_send(UiEvent::SystemMessage(text.to_string()));
+        let _ = self.ui_tx.try_send(UiEvent::SystemMessage(text.to_string()));
     }
 }
 

@@ -239,19 +239,28 @@ async fn my_actor(
 Clients can also use the typed actor pattern:
 
 ```rust
-with_typed_client_actor::<MyProtocol, _, _>(conn, |ctx, event| async move {
-    match event {
-        TypedClientEvent::Connected => { /* all channels established */ }
-        TypedClientEvent::Message(event) => { /* handle server message */ }
-        TypedClientEvent::Internal(event) => { /* handle self-sent event */ }
-        TypedClientEvent::Disconnected => { /* connection lost */ }
-    }
-}).await;
+let handle = run_typed_client_actor(
+    conn.into(),
+    my_context,
+    |ctx, event, _spawner| {
+        match event {
+            TypedClientEvent::Connected => { /* all channels established */ }
+            TypedClientEvent::Message(msg) => { /* handle server message */ }
+            TypedClientEvent::Internal(msg) => { /* handle self-sent event */ }
+            TypedClientEvent::Disconnected => { /* connection lost */ }
+        }
+    },
+    TokioSpawner,  // or WasmSpawner for WASM
+);
+
+// Send events via the handle:
+handle.sender.send(my_event)?;
 ```
 
 **Client context methods:**
 - `ctx.send(&event)` - Send event to server (routed by type)
 - `ctx.self_tx().send(event)` - Send event to self (for timers, async operations)
+- `ctx.game_context()` - Access your custom context
 
 ### Connection Flow
 

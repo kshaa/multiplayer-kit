@@ -37,15 +37,11 @@ WebSocket (TCP) at `ws://127.0.0.1:8080`:
 
 ## Web Client
 
-Build the WASM chat-client first:
+Build the WASM chat-client and then serve the web directory:
 ```bash
-cd example/chat-client
-wasm-pack build --target web --out-dir ../chat-web/pkg --no-default-features --features wasm
-```
-
-Then serve the web directory:
-```bash
-npx serve example/chat-web
+cd example/chat-web
+wasm-pack build ../chat-client --target web --out-dir ../chat-web/pkg --no-default-features --features wasm
+npx serve
 ```
 
 Open `http://localhost:3000` in Chrome/Edge (WebTransport required).
