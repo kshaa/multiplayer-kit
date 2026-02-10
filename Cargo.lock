@@ -492,6 +492,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "chat-protocol",
+ "futures",
  "js-sys",
  "multiplayer-kit-client",
  "multiplayer-kit-helpers",

@@ -1,14 +1,10 @@
-//! Simple chat CLI client using typed actor pattern.
+//! Simple chat CLI client using the adapter pattern.
 //!
 //! Run with: cargo run --bin chat-cli
 
-use chat_client::{
-    ApiClient, ChatEvent, ChatMessage, ChatProtocol, RoomConnection, RoomId, TypedClientContext,
-    TypedClientEvent, with_typed_client_actor,
-};
+use chat_client::{ApiClient, ChatClientAdapter, ChatHandle, GameClientContext, RoomConnection, RoomId, start_chat_actor};
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 const SERVER_HTTP: &str = "http://127.0.0.1:8080";
@@ -21,9 +17,39 @@ struct AuthRequest {
 
 /// Events from the chat actor to the main loop.
 enum UiEvent {
-    Message(String),
+    TextMessage(String, String), // username, content
+    SystemMessage(String),
     Connected,
     Disconnected,
+}
+
+/// CLI adapter - sends events to the UI channel.
+struct CliAdapter {
+    ui_tx: mpsc::Sender<UiEvent>,
+}
+
+// Required because ChatClientAdapter extends GameClientContext
+impl GameClientContext for CliAdapter {}
+
+impl ChatClientAdapter for CliAdapter {
+    fn on_connected(&self) {
+        let _ = self.ui_tx.blocking_send(UiEvent::Connected);
+    }
+
+    fn on_disconnected(&self) {
+        let _ = self.ui_tx.blocking_send(UiEvent::Disconnected);
+    }
+
+    fn on_text_message(&self, username: &str, content: &str) {
+        let _ = self.ui_tx.blocking_send(UiEvent::TextMessage(
+            username.to_string(),
+            content.to_string(),
+        ));
+    }
+
+    fn on_system_message(&self, text: &str) {
+        let _ = self.ui_tx.blocking_send(UiEvent::SystemMessage(text.to_string()));
+    }
 }
 
 #[tokio::main]
@@ -67,8 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // State
     let mut in_room = false;
-    let mut send_tx: Option<mpsc::Sender<String>> = None;
-    let mut actor_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut handle: Option<ChatHandle> = None;
 
     // Channel for stdin lines
     let (line_tx, mut line_rx) = mpsc::channel::<String>(10);
@@ -102,8 +127,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Handle UI events from chat actor
             Some(event) = ui_rx.recv() => {
                 match event {
-                    UiEvent::Message(msg) => {
-                        print!("\r\x1b[K{}\n", msg);
+                    UiEvent::TextMessage(user, content) => {
+                        print!("\r\x1b[K{}: {}\n", user, content);
+                    }
+                    UiEvent::SystemMessage(msg) => {
+                        print!("\r\x1b[K[system] {}\n", msg);
                     }
                     UiEvent::Connected => {
                         print!("\r\x1b[K[Connected]\n");
@@ -111,8 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     UiEvent::Disconnected => {
                         print!("\r\x1b[K[Disconnected]\n");
                         in_room = false;
-                        send_tx = None;
-                        actor_handle = None; // Actor already terminated
+                        handle = None;
                     }
                 }
                 // Reprint prompt
@@ -201,20 +228,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         match RoomConnection::connect(SERVER_QUIC, &ticket, resp.room_id).await {
                                             Ok(conn) => {
-                                                // Abort previous actor if any
-                                                if let Some(handle) = actor_handle.take() {
-                                                    handle.abort();
-                                                }
+                                                // Drop previous handle (actor will clean up)
+                                                handle = None;
 
-                                                let (tx, rx) = mpsc::channel::<String>(256);
-                                                send_tx = Some(tx);
+                                                let adapter = CliAdapter { ui_tx: ui_tx.clone() };
+
+                                                // Start the actor and get the handle directly
+                                                handle = Some(start_chat_actor(conn, adapter));
                                                 in_room = true;
-
-                                                let ui = ui_tx.clone();
-                                                let user = username.clone();
-                                                actor_handle = Some(tokio::spawn(async move {
-                                                    run_chat_actor(conn, user, ui, rx).await;
-                                                }));
 
                                                 println!("Connected! Type messages or /leave to exit.");
                                             }
@@ -255,22 +276,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("Joining room {}...", room_id);
                                 match RoomConnection::connect(SERVER_QUIC, &ticket, RoomId(room_id)).await {
                                     Ok(conn) => {
-                                        // Create channel for sending messages
-                                        let (tx, rx) = mpsc::channel::<String>(256);
-                                        send_tx = Some(tx);
+                                        // Drop previous handle (actor will clean up)
+                                        handle = None;
+
+                                        let adapter = CliAdapter { ui_tx: ui_tx.clone() };
+
+                                        // Start the actor and get the handle directly
+                                        handle = Some(start_chat_actor(conn, adapter));
                                         in_room = true;
-
-                                        // Abort previous actor if any
-                                        if let Some(handle) = actor_handle.take() {
-                                            handle.abort();
-                                        }
-
-                                        // Spawn typed actor
-                                        let ui = ui_tx.clone();
-                                        let user = username.clone();
-                                        actor_handle = Some(tokio::spawn(async move {
-                                            run_chat_actor(conn, user, ui, rx).await;
-                                        }));
                                     }
                                     Err(e) => {
                                         println!("Failed to connect: {}", e);
@@ -281,11 +294,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         "/leave" => {
                             if in_room {
-                                // Abort the actor task and clean up
-                                if let Some(handle) = actor_handle.take() {
-                                    handle.abort();
-                                }
-                                send_tx = None;
+                                // Drop handle (actor will clean up)
+                                handle = None;
                                 in_room = false;
                                 println!("Left room.");
                             } else {
@@ -298,14 +308,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else {
-                    // Send chat message via actor
-                    if let Some(ref tx) = send_tx {
-                        if tx.send(input.to_string()).await.is_err() {
-                            println!("Failed to send (disconnected)");
-                            send_tx = None;
+                    // Send chat message via handle
+                    if let Some(ref h) = handle {
+                        if let Err(e) = h.send_text(input) {
+                            println!("Failed to send: {}", e);
+                            handle = None;
                             in_room = false;
                         }
-                        // No local echo - server broadcasts back to us
                     } else {
                         println!("Not in a room. Use /join <id> first.");
                     }
@@ -323,78 +332,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-/// Run the chat actor using typed actor pattern.
-async fn run_chat_actor(
-    conn: RoomConnection,
-    username: String,
-    ui_tx: mpsc::Sender<UiEvent>,
-    input_rx: mpsc::Receiver<String>,
-) {
-    // Wrap input_rx in Arc for sharing with actor
-    let input_rx = Arc::new(tokio::sync::Mutex::new(input_rx));
-    let ui_tx = Arc::new(ui_tx);
-    let username = Arc::new(username);
-
-    with_typed_client_actor::<ChatProtocol, _, _>(conn, {
-        let input_rx = Arc::clone(&input_rx);
-        let ui_tx = Arc::clone(&ui_tx);
-        let username = Arc::clone(&username);
-
-        move |ctx: TypedClientContext<ChatProtocol>, event: TypedClientEvent<ChatProtocol>| {
-            let input_rx = Arc::clone(&input_rx);
-            let ui_tx = Arc::clone(&ui_tx);
-            let username = Arc::clone(&username);
-
-            async move {
-                match event {
-                    TypedClientEvent::Connected => {
-                        let _ = ui_tx.send(UiEvent::Connected).await;
-
-                        // Start a task to forward user input to the actor's send
-                        let ctx_clone = ctx.clone();
-                        let username = Arc::clone(&username);
-                        let input_rx = Arc::clone(&input_rx);
-                        tokio::spawn(async move {
-                            loop {
-                                let msg = {
-                                    let mut rx = input_rx.lock().await;
-                                    rx.recv().await
-                                };
-                                match msg {
-                                    Some(text) => {
-                                        let msg = ChatEvent::Chat(ChatMessage::Text {
-                                            username: (*username).clone(),
-                                            content: text,
-                                        });
-                                        let _ = ctx_clone.send(&msg).await;
-                                    }
-                                    None => break, // Input channel closed = leave room
-                                }
-                            }
-                        });
-                    }
-                    TypedClientEvent::Message(ChatEvent::Chat(ChatMessage::Text {
-                        username,
-                        content,
-                    })) => {
-                        let _ = ui_tx
-                            .send(UiEvent::Message(format!("{}: {}", username, content)))
-                            .await;
-                    }
-                    TypedClientEvent::Message(ChatEvent::Chat(ChatMessage::System(msg))) => {
-                        let _ = ui_tx.send(UiEvent::Message(msg)).await;
-                    }
-                    TypedClientEvent::Disconnected => {
-                        let _ = ui_tx.send(UiEvent::Disconnected).await;
-                    }
-                    TypedClientEvent::Internal(_) => {
-                        // Chat client doesn't use self-sent events
-                    }
-                }
-            }
-        }
-    })
-    .await;
 }

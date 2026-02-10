@@ -11,6 +11,41 @@
 use crate::ClientError;
 use crate::error::{ConnectionError, DisconnectReason, ReceiveError, SendError};
 use multiplayer_kit_protocol::RoomId;
+use std::future::Future;
+
+// ============================================================================
+// Traits for unified channel/connection API
+// ============================================================================
+
+/// Trait for channel I/O operations.
+///
+/// Implemented by both native and WASM `Channel` types.
+/// Allows writing generic code that works on all platforms.
+///
+/// Note: The futures returned are NOT required to be Send, as WASM
+/// is single-threaded. Use `MaybeSend` bounds at callsites if needed.
+pub trait ChannelIO {
+    /// Read bytes from the channel into buffer. Returns number of bytes read.
+    fn read(&self, buf: &mut [u8]) -> impl Future<Output = Result<usize, ClientError>>;
+
+    /// Write bytes to the channel.
+    fn write(&self, data: &[u8]) -> impl Future<Output = Result<(), ClientError>>;
+
+    /// Check if the channel is still connected.
+    fn is_connected(&self) -> bool;
+}
+
+/// Trait for room connections.
+///
+/// Implemented by both native and WASM `RoomConnection` types.
+/// Allows writing generic code that works on all platforms.
+pub trait RoomConnectionLike {
+    /// The channel type returned by `open_channel`.
+    type Channel: ChannelIO;
+
+    /// Open a new channel (persistent bidirectional stream).
+    fn open_channel(&self) -> impl Future<Output = Result<Self::Channel, ClientError>>;
+}
 
 // ============================================================================
 // Native implementation
@@ -445,6 +480,29 @@ mod native {
             Ok(())
         }
     }
+
+    // Trait implementations
+    impl super::ChannelIO for Channel {
+        async fn read(&self, buf: &mut [u8]) -> Result<usize, ClientError> {
+            Channel::read(self, buf).await
+        }
+
+        async fn write(&self, data: &[u8]) -> Result<(), ClientError> {
+            Channel::write(self, data).await
+        }
+
+        fn is_connected(&self) -> bool {
+            Channel::is_connected(self)
+        }
+    }
+
+    impl super::RoomConnectionLike for RoomConnection {
+        type Channel = Channel;
+
+        async fn open_channel(&self) -> Result<Self::Channel, ClientError> {
+            RoomConnection::open_channel(self).await
+        }
+    }
 }
 
 // ============================================================================
@@ -791,6 +849,29 @@ mod wasm {
         }
     }
 
+    // Trait implementations
+    impl super::ChannelIO for Channel {
+        async fn read(&self, buf: &mut [u8]) -> Result<usize, ClientError> {
+            Channel::read(self, buf).await
+        }
+
+        async fn write(&self, data: &[u8]) -> Result<(), ClientError> {
+            Channel::write(self, data).await
+        }
+
+        fn is_connected(&self) -> bool {
+            Channel::is_connected(self)
+        }
+    }
+
+    impl super::RoomConnectionLike for RoomConnection {
+        type Channel = Channel;
+
+        async fn open_channel(&self) -> Result<Self::Channel, ClientError> {
+            RoomConnection::open_channel(self).await
+        }
+    }
+
     fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
         const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -911,6 +992,29 @@ mod fallback {
 
         pub async fn close(self) -> Result<(), ClientError> {
             Ok(())
+        }
+    }
+
+    // Trait implementations
+    impl super::ChannelIO for Channel {
+        async fn read(&self, buf: &mut [u8]) -> Result<usize, ClientError> {
+            Channel::read(self, buf).await
+        }
+
+        async fn write(&self, data: &[u8]) -> Result<(), ClientError> {
+            Channel::write(self, data).await
+        }
+
+        fn is_connected(&self) -> bool {
+            Channel::is_connected(self)
+        }
+    }
+
+    impl super::RoomConnectionLike for RoomConnection {
+        type Channel = Channel;
+
+        async fn open_channel(&self) -> Result<Self::Channel, ClientError> {
+            RoomConnection::open_channel(self).await
         }
     }
 }

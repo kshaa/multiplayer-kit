@@ -72,16 +72,22 @@ pub enum ChatChannel {
 // ============================================================================
 
 /// Messages on the Chat channel.
+///
+/// The protocol distinguishes between client→server and server→client messages:
+/// - `SendText`: Client sends to server (no username - server knows who sent it)
+/// - `TextSent`: Server broadcasts to clients (includes username)
+/// - `System`: Server sends system notifications
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ChatMessage {
-    /// A text message from a user.
-    Text {
-        /// The username of the sender.
-        username: String,
-        /// The message content.
-        content: String,
-    },
-    /// System message (join/leave notifications, etc.)
+    /// Client → Server: Send a text message.
+    /// The server will add the username and broadcast as `TextSent`.
+    SendText { content: String },
+
+    /// Server → Clients: A text message was sent.
+    /// Includes the username of the sender.
+    TextSent { username: String, content: String },
+
+    /// Server → Clients: System message (join/leave notifications, etc.)
     System(String),
 }
 

@@ -63,7 +63,6 @@ impl JsApiClient {
 
     /// List all available rooms.
     #[wasm_bindgen(js_name = listRooms)]
-    #[wasm_bindgen(js_name = listRooms)]
     pub async fn list_rooms(&self, ticket: &str) -> Result<JsValue, JsError> {
         let rooms = self
             .inner
@@ -283,6 +282,24 @@ impl JsRoomConnection {
     #[wasm_bindgen(js_name = isConnected)]
     pub fn is_connected(&self) -> bool {
         self.inner.is_connected()
+    }
+}
+
+// Methods for Rust WASM code (not exposed to JavaScript)
+impl JsRoomConnection {
+    /// Open a new channel and return the raw Channel (for Rust WASM code).
+    ///
+    /// This is not exposed to JavaScript - use `open_channel()` instead.
+    pub async fn open_channel_raw(&self) -> Result<crate::Channel, crate::ClientError> {
+        self.inner.open_channel().await
+    }
+
+    /// Consume this wrapper and return the inner RoomConnection.
+    ///
+    /// Use this when you need to pass the connection to helpers that
+    /// expect `RoomConnection` directly.
+    pub fn into_inner(self) -> crate::RoomConnection {
+        self.inner
     }
 }
 

@@ -16,14 +16,28 @@ mod typed;
 #[cfg(any(feature = "server", feature = "client", feature = "wasm"))]
 pub use typed::{DecodeError, EncodeError, TypedProtocol};
 
+// Conditional Send/Sync traits (used for cross-platform compatibility)
+#[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
+pub use typed::{MaybeSend, MaybeSync};
+
 // Server-specific typed exports
 #[cfg(feature = "server")]
 pub use typed::{TypedContext, TypedEvent, with_typed_actor};
 
-// Client-specific typed exports (native)
-#[cfg(feature = "client")]
-pub use typed::{TypedClientContext, TypedClientEvent, with_typed_client_actor};
+// Client-specific typed exports (unified for native and WASM)
+#[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
+pub use typed::{
+    ActorHandle, ActorSendError, ClientConnection, GameClientContext, SharedPtr,
+    TypedActorSender, TypedClientContext, TypedClientEvent, run_typed_client_actor,
+};
 
-// Client-specific typed exports (WASM)
-#[cfg(feature = "wasm")]
-pub use typed::JsTypedClientActor;
+// Spawner trait and implementations
+#[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
+pub use typed::Spawner;
+
+#[cfg(feature = "client")]
+pub use typed::TokioSpawner;
+
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub use typed::WasmSpawner;
+

@@ -11,4 +11,4 @@ pub use error::{
     ClientError, ConnectionError, ConnectionState, DisconnectReason, ReceiveError, SendError,
 };
 pub use lobby::LobbyClient;
-pub use room::{Channel, ConnectionConfig, RoomConnection, Transport};
+pub use room::{Channel, ChannelIO, ConnectionConfig, RoomConnection, RoomConnectionLike, Transport};

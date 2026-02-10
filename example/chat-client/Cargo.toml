@@ -22,8 +22,9 @@ tokio = { version = "1", features = ["sync", "rt"] }
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
+futures = { version = "0.3", optional = true }
 
 [features]
 default = ["native"]
 native = ["multiplayer-kit-client/native", "multiplayer-kit-helpers/client", "tokio/rt"]
-wasm = ["multiplayer-kit-client/wasm", "multiplayer-kit-helpers/wasm", "wasm-bindgen", "wasm-bindgen-futures", "js-sys"]
+wasm = ["multiplayer-kit-client/wasm", "multiplayer-kit-helpers/wasm", "wasm-bindgen", "wasm-bindgen-futures", "js-sys", "futures"]

@@ -187,10 +187,10 @@ async fn chat_actor(
         TypedEvent::Message {
             sender,
             channel: ChatChannel::Chat,
-            event: ChatEvent::Chat(ChatMessage::Text { content, .. }),
+            event: ChatEvent::Chat(ChatMessage::SendText { content }),
             ..
         } => {
-            // Use game context to track message count
+            // Client sent a text message - add their username and broadcast
             let count = game_ctx.increment_message_count();
             tracing::info!(
                 "[{}] [Room {:?}] Message #{}: {}: {}",
@@ -201,8 +201,8 @@ async fn chat_actor(
                 content
             );
 
-            // Broadcast to all (include sender - they'll see their username)
-            let msg = ChatEvent::Chat(ChatMessage::Text {
+            // Broadcast as TextSent with the sender's username
+            let msg = ChatEvent::Chat(ChatMessage::TextSent {
                 username: sender.username,
                 content,
             });
@@ -210,7 +210,7 @@ async fn chat_actor(
         }
 
         TypedEvent::Message { .. } => {
-            // Ignore other message types (system messages from clients, etc.)
+            // Ignore other message types (TextSent from clients, etc.)
         }
 
         TypedEvent::Internal(_) => {
