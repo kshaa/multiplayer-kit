@@ -4,7 +4,7 @@
 //! This file only contains WASM-specific JS interop code.
 
 pub use crate::actor::{start_chat_actor, ChatClientContext, ChatHandle};
-pub use multiplayer_kit_client::wasm_exports::JsApiClient;
+pub use multiplayer_kit_client::JsApiClient;
 
 use crate::ChatClientAdapter;
 use wasm_bindgen::prelude::*;
@@ -97,7 +97,7 @@ impl JsChatHandle {
 /// ```
 #[wasm_bindgen(js_name = runChatActor)]
 pub fn js_run_chat_actor(
-    conn: multiplayer_kit_client::wasm_exports::JsRoomConnection,
+    conn: multiplayer_kit_client::JsRoomConnection,
     adapter: JsValue,
 ) -> Result<JsChatHandle, JsError> {
     let rust_adapter = JsAdapter {

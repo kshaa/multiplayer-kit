@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --bin chat-cli
 
-use chat_client::{ApiClient, ChatClientAdapter, ChatHandle, GameClientContext, RoomConnection, RoomId, start_chat_actor};
+use chat_client::{ApiClient, ChatClientAdapter, ChatHandle, ConnectionConfig, GameClientContext, RoomConnection, RoomId, start_chat_actor};
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
 use tokio::sync::mpsc;
@@ -226,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let action = if resp.created { "Created" } else { "Found" };
                                         println!("{} room {}. Joining...", action, resp.room_id.0);
 
-                                        match RoomConnection::connect(SERVER_QUIC, &ticket, resp.room_id).await {
+                                        match RoomConnection::connect(SERVER_QUIC, &ticket, resp.room_id, ConnectionConfig::default()).await {
                                             Ok(conn) => {
                                                 // Drop previous handle (actor will clean up)
                                                 handle = None;
@@ -274,7 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
 
                                 println!("Joining room {}...", room_id);
-                                match RoomConnection::connect(SERVER_QUIC, &ticket, RoomId(room_id)).await {
+                                match RoomConnection::connect(SERVER_QUIC, &ticket, RoomId(room_id), ConnectionConfig::default()).await {
                                     Ok(conn) => {
                                         // Drop previous handle (actor will clean up)
                                         handle = None;

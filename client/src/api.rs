@@ -1,15 +1,17 @@
 //! HTTP/REST API client for ticketing, room management, and server metadata.
+//!
+//! Uses ehttp for cross-platform HTTP (native + WASM).
 
 use crate::ClientError;
 use crate::error::{ConnectionError, ReceiveError};
 use multiplayer_kit_protocol::{QuickplayResponse, RoomId, RoomInfo};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-use serde::de::DeserializeOwned;
+use wasm_bindgen::prelude::*;
 
 // ============================================================================
-// Shared types
+// Response types
 // ============================================================================
 
 /// Response from the ticket endpoint.
@@ -31,518 +33,309 @@ pub struct CreateRoomResponse {
 }
 
 // ============================================================================
-// Native implementation
+// HTTP helpers (wrapping ehttp's callback API into async)
 // ============================================================================
 
-#[cfg(feature = "native")]
-mod native {
-    use super::*;
+async fn fetch(request: ehttp::Request) -> Result<ehttp::Response, ClientError> {
+    let (tx, rx) = futures::channel::oneshot::channel();
 
-    /// HTTP API client for interacting with the multiplayer-kit server's REST endpoints.
-    pub struct ApiClient {
-        base_url: String,
-        http_client: reqwest::Client,
+    ehttp::fetch(request, move |result| {
+        let _ = tx.send(result);
+    });
+
+    rx.await
+        .map_err(|_| ClientError::Connection(ConnectionError::Transport("Request cancelled".to_string())))?
+        .map_err(|e| ClientError::Connection(ConnectionError::Transport(e)))
+}
+
+fn parse_response<T: DeserializeOwned>(response: ehttp::Response) -> Result<T, ClientError> {
+    if !response.ok {
+        let status = response.status;
+        let body = response.text().unwrap_or_default();
+        return Err(ClientError::Connection(ConnectionError::ServerRejected(
+            format!("{}: {}", status, body),
+        )));
     }
 
-    impl ApiClient {
-        /// Create a new API client pointing to the given server base URL.
-        /// Example: `ApiClient::new("http://127.0.0.1:8080")`
-        pub fn new(base_url: &str) -> Self {
-            Self {
-                base_url: base_url.trim_end_matches('/').to_string(),
-                http_client: reqwest::Client::new(),
-            }
+    let bytes = response.bytes;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
+}
+
+fn parse_optional_response<T: DeserializeOwned>(
+    response: ehttp::Response,
+) -> Result<Option<T>, ClientError> {
+    if response.status == 404 {
+        return Ok(None);
+    }
+
+    if !response.ok {
+        let status = response.status;
+        let body = response.text().unwrap_or_default();
+        return Err(ClientError::Connection(ConnectionError::ServerRejected(
+            format!("{}: {}", status, body),
+        )));
+    }
+
+    let bytes = response.bytes;
+    let value: T = serde_json::from_slice(&bytes)
+        .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))?;
+    Ok(Some(value))
+}
+
+fn post_json(url: String, body: Vec<u8>, auth: Option<&str>) -> ehttp::Request {
+    let mut req = ehttp::Request::post(url, body);
+    req.headers.insert("Content-Type".to_string(), "application/json".to_string());
+    if let Some(token) = auth {
+        req.headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+    }
+    req
+}
+
+fn get_with_auth(url: String, auth: Option<&str>) -> ehttp::Request {
+    let mut req = ehttp::Request::get(url);
+    if let Some(token) = auth {
+        req.headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+    }
+    req
+}
+
+fn delete_with_auth(url: String, auth: &str) -> ehttp::Request {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ehttp::Request {
+            method: "DELETE".to_string(),
+            url,
+            body: Vec::new(),
+            headers: ehttp::Headers::new(&[("Authorization", &format!("Bearer {}", auth))]),
+            mode: ehttp::Mode::Cors,
         }
-
-        /// Request a ticket from the server.
-        /// The `auth_payload` is application-specific and will be validated by
-        /// the server's configured auth handler.
-        pub async fn get_ticket<T: Serialize>(
-            &self,
-            auth_payload: &T,
-        ) -> Result<TicketResponse, ClientError> {
-            let url = format!("{}/ticket", self.base_url);
-            let resp = self
-                .http_client
-                .post(&url)
-                .json(auth_payload)
-                .send()
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    format!("{}: {}", status, body),
-                )));
-            }
-
-            resp.json()
-                .await
-                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
-        }
-
-        /// Get the server's self-signed certificate hash (base64-encoded SHA-256).
-        /// Returns `None` if the server doesn't expose a cert hash (e.g., using real certs).
-        pub async fn get_cert_hash(&self) -> Result<Option<String>, ClientError> {
-            let url = format!("{}/cert-hash", self.base_url);
-            let resp =
-                self.http_client.get(&url).send().await.map_err(|e| {
-                    ClientError::Connection(ConnectionError::Transport(e.to_string()))
-                })?;
-
-            if resp.status().is_success() {
-                let data: CertHashResponse = resp.json().await.map_err(|e| {
-                    ClientError::Receive(ReceiveError::MalformedMessage(e.to_string()))
-                })?;
-                Ok(Some(data.hash))
-            } else if resp.status() == reqwest::StatusCode::NOT_FOUND {
-                Ok(None)
-            } else {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    format!("{}: {}", status, body),
-                )))
-            }
-        }
-
-        /// List all available rooms. Requires a valid ticket.
-        pub async fn list_rooms(&self, ticket: &str) -> Result<Vec<RoomInfo>, ClientError> {
-            let url = format!("{}/rooms", self.base_url);
-            let resp = self
-                .http_client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", ticket))
-                .send()
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    format!("{}: {}", status, body),
-                )));
-            }
-
-            resp.json()
-                .await
-                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
-        }
-
-        /// Create a new room. Requires a valid ticket in the Authorization header.
-        /// `config` should be a serializable room config (e.g., `{"name": "My Room"}`).
-        pub async fn create_room<C: serde::Serialize>(
-            &self,
-            ticket: &str,
-            config: &C,
-        ) -> Result<CreateRoomResponse, ClientError> {
-            let url = format!("{}/rooms", self.base_url);
-            let resp = self
-                .http_client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", ticket))
-                .json(config)
-                .send()
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    format!("{}: {}", status, body),
-                )));
-            }
-
-            resp.json()
-                .await
-                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
-        }
-
-        /// Delete a room. Requires a valid ticket in the Authorization header.
-        pub async fn delete_room(&self, ticket: &str, room_id: RoomId) -> Result<(), ClientError> {
-            let url = format!("{}/rooms/{}", self.base_url, room_id.0);
-            let resp = self
-                .http_client
-                .delete(&url)
-                .header("Authorization", format!("Bearer {}", ticket))
-                .send()
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    format!("{}: {}", status, body),
-                )));
-            }
-
-            Ok(())
-        }
-
-        /// Quickplay - find or create a room.
-        /// `filter` is optional game-specific criteria for finding a room.
-        pub async fn quickplay<F: serde::Serialize>(
-            &self,
-            ticket: &str,
-            filter: Option<&F>,
-        ) -> Result<QuickplayResponse, ClientError> {
-            let url = format!("{}/quickplay", self.base_url);
-            let mut req = self
-                .http_client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", ticket));
-
-            if let Some(f) = filter {
-                req = req.json(f);
-            } else {
-                req = req.json(&serde_json::json!({}));
-            }
-
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    format!("{}: {}", status, body),
-                )));
-            }
-
-            resp.json()
-                .await
-                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        ehttp::Request {
+            method: "DELETE".to_string(),
+            url,
+            body: Vec::new(),
+            headers: ehttp::Headers::new(&[("Authorization", &format!("Bearer {}", auth))]),
         }
     }
 }
 
 // ============================================================================
-// WASM implementation
+// ApiClient - single implementation for both native and WASM
 // ============================================================================
+
+/// HTTP API client for interacting with the multiplayer-kit server's REST endpoints.
+///
+/// Works on both native (using system HTTP) and WASM (using browser fetch).
+pub struct ApiClient {
+    base_url: String,
+}
+
+impl ApiClient {
+    /// Create a new API client pointing to the given server base URL.
+    ///
+    /// Example: `ApiClient::new("http://127.0.0.1:8080")`
+    pub fn new(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+        }
+    }
+
+    /// Request a ticket from the server.
+    ///
+    /// The `auth_payload` is application-specific and will be validated by
+    /// the server's configured auth handler.
+    pub async fn get_ticket<T: Serialize>(
+        &self,
+        auth_payload: &T,
+    ) -> Result<TicketResponse, ClientError> {
+        let url = format!("{}/ticket", self.base_url);
+        let body = serde_json::to_vec(auth_payload)
+            .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
+
+        let request = post_json(url, body, None);
+        let response = fetch(request).await?;
+        parse_response(response)
+    }
+
+    /// Get the server's self-signed certificate hash (base64-encoded SHA-256).
+    ///
+    /// Returns `None` if the server doesn't expose a cert hash (e.g., using real certs).
+    pub async fn get_cert_hash(&self) -> Result<Option<String>, ClientError> {
+        let url = format!("{}/cert-hash", self.base_url);
+        let request = ehttp::Request::get(url);
+        let response = fetch(request).await?;
+        let data: Option<CertHashResponse> = parse_optional_response(response)?;
+        Ok(data.map(|r| r.hash))
+    }
+
+    /// List all available rooms. Requires a valid ticket.
+    pub async fn list_rooms(&self, ticket: &str) -> Result<Vec<RoomInfo>, ClientError> {
+        let url = format!("{}/rooms", self.base_url);
+        let request = get_with_auth(url, Some(ticket));
+        let response = fetch(request).await?;
+        parse_response(response)
+    }
+
+    /// Create a new room. Requires a valid ticket in the Authorization header.
+    ///
+    /// `config` should be a serializable room config (e.g., `{"name": "My Room"}`).
+    pub async fn create_room<C: Serialize>(
+        &self,
+        ticket: &str,
+        config: &C,
+    ) -> Result<CreateRoomResponse, ClientError> {
+        let url = format!("{}/rooms", self.base_url);
+        let body = serde_json::to_vec(config)
+            .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
+
+        let request = post_json(url, body, Some(ticket));
+        let response = fetch(request).await?;
+        parse_response(response)
+    }
+
+    /// Delete a room. Requires a valid ticket in the Authorization header.
+    pub async fn delete_room(&self, ticket: &str, room_id: RoomId) -> Result<(), ClientError> {
+        let url = format!("{}/rooms/{}", self.base_url, room_id.0);
+        let request = delete_with_auth(url, ticket);
+        let response = fetch(request).await?;
+
+        if !response.ok {
+            let status = response.status;
+            let body = response.text().unwrap_or_default();
+            return Err(ClientError::Connection(ConnectionError::ServerRejected(
+                format!("{}: {}", status, body),
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Quickplay - find or create a room.
+    ///
+    /// `filter` is optional game-specific criteria for finding a room.
+    pub async fn quickplay<F: Serialize>(
+        &self,
+        ticket: &str,
+        filter: Option<&F>,
+    ) -> Result<QuickplayResponse, ClientError> {
+        let url = format!("{}/quickplay", self.base_url);
+
+        let body = match filter {
+            Some(f) => serde_json::to_vec(f)
+                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?,
+            None => b"{}".to_vec(),
+        };
+
+        let request = post_json(url, body, Some(ticket));
+        let response = fetch(request).await?;
+        parse_response(response)
+    }
+}
+
+// ============================================================================
+// WASM bindings
+// ============================================================================
+
+/// HTTP API client for JavaScript.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+#[wasm_bindgen]
+pub struct JsApiClient {
+    inner: ApiClient,
+}
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-mod wasm {
-    use super::*;
-    use wasm_bindgen::prelude::*;
-    use wasm_bindgen_futures::JsFuture;
-    use web_sys::{Request, RequestInit, RequestMode, Response};
-
-    /// HTTP API client for interacting with the multiplayer-kit server's REST endpoints.
-    pub struct ApiClient {
-        base_url: String,
+#[wasm_bindgen]
+impl JsApiClient {
+    /// Create a new API client. Example: `new JsApiClient("http://127.0.0.1:8080")`
+    #[wasm_bindgen(constructor)]
+    pub fn new(base_url: &str) -> JsApiClient {
+        JsApiClient {
+            inner: ApiClient::new(base_url),
+        }
     }
 
-    impl ApiClient {
-        /// Create a new API client pointing to the given server base URL.
-        pub fn new(base_url: &str) -> Self {
-            Self {
-                base_url: base_url.trim_end_matches('/').to_string(),
-            }
-        }
+    /// Request a ticket from the server. Pass your auth payload as a JS object.
+    #[wasm_bindgen(js_name = getTicket)]
+    pub async fn get_ticket(&self, auth_payload: JsValue) -> Result<JsValue, JsError> {
+        let payload: serde_json::Value = serde_wasm_bindgen::from_value(auth_payload)
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
-        async fn fetch<T: DeserializeOwned>(
-            &self,
-            method: &str,
-            path: &str,
-            body: Option<String>,
-            auth_token: Option<&str>,
-        ) -> Result<T, ClientError> {
-            let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .inner
+            .get_ticket(&payload)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
-            let opts = RequestInit::new();
-            opts.set_method(method);
-            opts.set_mode(RequestMode::Cors);
+        serde_wasm_bindgen::to_value(&resp).map_err(|e| JsError::new(&e.to_string()))
+    }
 
-            if let Some(b) = body {
-                opts.set_body(&JsValue::from_str(&b));
-            }
+    /// Get the server's certificate hash (base64 SHA-256) for self-signed certs.
+    #[wasm_bindgen(js_name = getCertHash)]
+    pub async fn get_cert_hash(&self) -> Result<Option<String>, JsError> {
+        self.inner
+            .get_cert_hash()
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
 
-            let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-            })?;
+    /// List all available rooms.
+    #[wasm_bindgen(js_name = listRooms)]
+    pub async fn list_rooms(&self, ticket: &str) -> Result<JsValue, JsError> {
+        let rooms = self
+            .inner
+            .list_rooms(ticket)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
-            request
-                .headers()
-                .set("Content-Type", "application/json")
-                .map_err(|e| {
-                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-                })?;
+        serde_wasm_bindgen::to_value(&rooms).map_err(|e| JsError::new(&e.to_string()))
+    }
 
-            if let Some(token) = auth_token {
-                request
-                    .headers()
-                    .set("Authorization", &format!("Bearer {}", token))
-                    .map_err(|e| {
-                        ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-                    })?;
-            }
+    /// Create a new room with config. Returns { room_id: number }.
+    #[wasm_bindgen(js_name = createRoom)]
+    pub async fn create_room(&self, ticket: &str, config: JsValue) -> Result<JsValue, JsError> {
+        let config: serde_json::Value = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsError::new(&format!("Invalid config: {}", e)))?;
 
-            let window = web_sys::window().ok_or_else(|| {
-                ClientError::Connection(ConnectionError::Transport("No window".to_string()))
-            })?;
+        let resp = self
+            .inner
+            .create_room(ticket, &config)
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
-            let resp_value = JsFuture::from(window.fetch_with_request(&request))
-                .await
-                .map_err(|e| {
-                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-                })?;
+        serde_wasm_bindgen::to_value(&resp).map_err(|e| JsError::new(&e.to_string()))
+    }
 
-            let resp: Response = resp_value.unchecked_into();
+    /// Delete a room.
+    #[wasm_bindgen(js_name = deleteRoom)]
+    pub async fn delete_room(&self, ticket: &str, room_id: u32) -> Result<(), JsError> {
+        self.inner
+            .delete_room(ticket, RoomId(room_id as u64))
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
 
-            if !resp.ok() {
-                let status = resp.status();
-                let body_text = JsFuture::from(resp.text().unwrap())
-                    .await
-                    .map(|v| v.as_string().unwrap_or_default())
-                    .unwrap_or_default();
-                return Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    format!("{}: {}", status, body_text),
-                )));
-            }
+    /// Quickplay - find or create a room.
+    /// Returns { room_id: number, created: boolean }.
+    #[wasm_bindgen]
+    pub async fn quickplay(&self, ticket: &str, filter: JsValue) -> Result<JsValue, JsError> {
+        let filter_opt: Option<serde_json::Value> = if filter.is_null() || filter.is_undefined() {
+            None
+        } else {
+            Some(
+                serde_wasm_bindgen::from_value(filter)
+                    .map_err(|e| JsError::new(&format!("Invalid filter: {}", e)))?,
+            )
+        };
 
-            let json = JsFuture::from(resp.json().unwrap()).await.map_err(|e| {
-                ClientError::Receive(ReceiveError::MalformedMessage(format!("{:?}", e)))
-            })?;
+        let resp = self
+            .inner
+            .quickplay(ticket, filter_opt.as_ref())
+            .await
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
-            serde_wasm_bindgen::from_value(json)
-                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))
-        }
-
-        async fn fetch_optional<T: DeserializeOwned>(
-            &self,
-            method: &str,
-            path: &str,
-        ) -> Result<Option<T>, ClientError> {
-            let url = format!("{}{}", self.base_url, path);
-
-            let opts = RequestInit::new();
-            opts.set_method(method);
-            opts.set_mode(RequestMode::Cors);
-
-            let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-            })?;
-
-            let window = web_sys::window().ok_or_else(|| {
-                ClientError::Connection(ConnectionError::Transport("No window".to_string()))
-            })?;
-
-            let resp_value = JsFuture::from(window.fetch_with_request(&request))
-                .await
-                .map_err(|e| {
-                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-                })?;
-
-            let resp: Response = resp_value.unchecked_into();
-
-            if resp.status() == 404 {
-                return Ok(None);
-            }
-
-            if !resp.ok() {
-                let status = resp.status();
-                let body_text = JsFuture::from(resp.text().unwrap())
-                    .await
-                    .map(|v| v.as_string().unwrap_or_default())
-                    .unwrap_or_default();
-                return Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    format!("{}: {}", status, body_text),
-                )));
-            }
-
-            let json = JsFuture::from(resp.json().unwrap()).await.map_err(|e| {
-                ClientError::Receive(ReceiveError::MalformedMessage(format!("{:?}", e)))
-            })?;
-
-            let value: T = serde_wasm_bindgen::from_value(json)
-                .map_err(|e| ClientError::Receive(ReceiveError::MalformedMessage(e.to_string())))?;
-
-            Ok(Some(value))
-        }
-
-        /// Request a ticket from the server.
-        pub async fn get_ticket<T: Serialize>(
-            &self,
-            auth_payload: &T,
-        ) -> Result<TicketResponse, ClientError> {
-            let body = serde_json::to_string(auth_payload)
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-            self.fetch("POST", "/ticket", Some(body), None).await
-        }
-
-        /// Get the server's self-signed certificate hash.
-        pub async fn get_cert_hash(&self) -> Result<Option<String>, ClientError> {
-            let resp: Option<CertHashResponse> = self.fetch_optional("GET", "/cert-hash").await?;
-            Ok(resp.map(|r| r.hash))
-        }
-
-        /// List all available rooms.
-        pub async fn list_rooms(&self, ticket: &str) -> Result<Vec<RoomInfo>, ClientError> {
-            self.fetch("GET", "/rooms", None, Some(ticket)).await
-        }
-
-        /// Create a new room with config.
-        pub async fn create_room<C: serde::Serialize>(
-            &self,
-            ticket: &str,
-            config: &C,
-        ) -> Result<CreateRoomResponse, ClientError> {
-            let body = serde_json::to_string(config)
-                .map_err(|e| ClientError::Connection(ConnectionError::Transport(e.to_string())))?;
-            self.fetch("POST", "/rooms", Some(body), Some(ticket)).await
-        }
-
-        /// Delete a room.
-        pub async fn delete_room(&self, ticket: &str, room_id: RoomId) -> Result<(), ClientError> {
-            let url = format!("{}/rooms/{}", self.base_url, room_id.0);
-
-            let opts = RequestInit::new();
-            opts.set_method("DELETE");
-            opts.set_mode(RequestMode::Cors);
-
-            let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| {
-                ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-            })?;
-
-            request
-                .headers()
-                .set("Authorization", &format!("Bearer {}", ticket))
-                .map_err(|e| {
-                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-                })?;
-
-            let window = web_sys::window().ok_or_else(|| {
-                ClientError::Connection(ConnectionError::Transport("No window".to_string()))
-            })?;
-
-            let resp_value = JsFuture::from(window.fetch_with_request(&request))
-                .await
-                .map_err(|e| {
-                    ClientError::Connection(ConnectionError::Transport(format!("{:?}", e)))
-                })?;
-
-            let resp: Response = resp_value.unchecked_into();
-
-            if !resp.ok() {
-                let status = resp.status();
-                let body_text = JsFuture::from(resp.text().unwrap())
-                    .await
-                    .map(|v| v.as_string().unwrap_or_default())
-                    .unwrap_or_default();
-                return Err(ClientError::Connection(ConnectionError::ServerRejected(
-                    format!("{}: {}", status, body_text),
-                )));
-            }
-
-            Ok(())
-        }
-
-        /// Quickplay - find or create a room.
-        pub async fn quickplay<F: serde::Serialize>(
-            &self,
-            ticket: &str,
-            filter: Option<&F>,
-        ) -> Result<QuickplayResponse, ClientError> {
-            let body = match filter {
-                Some(f) => serde_json::to_string(f).map_err(|e| {
-                    ClientError::Connection(ConnectionError::Transport(e.to_string()))
-                })?,
-                None => "{}".to_string(),
-            };
-            self.fetch("POST", "/quickplay", Some(body), Some(ticket))
-                .await
-        }
+        serde_wasm_bindgen::to_value(&resp).map_err(|e| JsError::new(&e.to_string()))
     }
 }
-
-// ============================================================================
-// Fallback
-// ============================================================================
-
-#[cfg(not(any(feature = "native", all(feature = "wasm", target_arch = "wasm32"))))]
-mod fallback {
-    use super::*;
-
-    pub struct ApiClient {
-        _base_url: String,
-    }
-
-    impl ApiClient {
-        pub fn new(base_url: &str) -> Self {
-            Self {
-                _base_url: base_url.to_string(),
-            }
-        }
-
-        pub async fn get_ticket<T: Serialize>(
-            &self,
-            _auth_payload: &T,
-        ) -> Result<TicketResponse, ClientError> {
-            Err(ClientError::Connection(ConnectionError::Transport(
-                "No HTTP feature enabled".to_string(),
-            )))
-        }
-
-        pub async fn get_cert_hash(&self) -> Result<Option<String>, ClientError> {
-            Err(ClientError::Connection(ConnectionError::Transport(
-                "No HTTP feature enabled".to_string(),
-            )))
-        }
-
-        pub async fn list_rooms(&self, _ticket: &str) -> Result<Vec<RoomInfo>, ClientError> {
-            Err(ClientError::Connection(ConnectionError::Transport(
-                "No HTTP feature enabled".to_string(),
-            )))
-        }
-
-        pub async fn create_room<C: serde::Serialize>(
-            &self,
-            _ticket: &str,
-            _config: &C,
-        ) -> Result<CreateRoomResponse, ClientError> {
-            Err(ClientError::Connection(ConnectionError::Transport(
-                "No HTTP feature enabled".to_string(),
-            )))
-        }
-
-        pub async fn delete_room(
-            &self,
-            _ticket: &str,
-            _room_id: RoomId,
-        ) -> Result<(), ClientError> {
-            Err(ClientError::Connection(ConnectionError::Transport(
-                "No HTTP feature enabled".to_string(),
-            )))
-        }
-
-        pub async fn quickplay<F: serde::Serialize>(
-            &self,
-            _ticket: &str,
-            _filter: Option<&F>,
-        ) -> Result<QuickplayResponse, ClientError> {
-            Err(ClientError::Connection(ConnectionError::Transport(
-                "No HTTP feature enabled".to_string(),
-            )))
-        }
-    }
-}
-
-// ============================================================================
-// Re-export
-// ============================================================================
-
-#[cfg(feature = "native")]
-pub use native::ApiClient;
-
-#[cfg(all(feature = "wasm", target_arch = "wasm32", not(feature = "native")))]
-pub use wasm::ApiClient;
-
-#[cfg(not(any(feature = "native", all(feature = "wasm", target_arch = "wasm32"))))]
-pub use fallback::ApiClient;

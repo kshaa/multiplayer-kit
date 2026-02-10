@@ -2,6 +2,9 @@
 
 use thiserror::Error;
 
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+use wasm_bindgen::prelude::*;
+
 /// Main client error type.
 #[derive(Error, Debug)]
 pub enum ClientError {
@@ -144,6 +147,62 @@ impl ConnectionState {
         match self {
             ConnectionState::Lost(reason) => Some(reason),
             _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// WASM bindings
+// ============================================================================
+
+/// Connection state as exposed to JavaScript.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+pub struct JsConnectionState {
+    state: String,
+    reason: Option<String>,
+}
+
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+#[wasm_bindgen]
+impl JsConnectionState {
+    #[wasm_bindgen(getter)]
+    pub fn state(&self) -> String {
+        self.state.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn reason(&self) -> Option<String> {
+        self.reason.clone()
+    }
+
+    #[wasm_bindgen(js_name = isConnected)]
+    pub fn is_connected(&self) -> bool {
+        self.state == "connected"
+    }
+}
+
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+impl From<ConnectionState> for JsConnectionState {
+    fn from(state: ConnectionState) -> Self {
+        match state {
+            ConnectionState::Disconnected => JsConnectionState {
+                state: "disconnected".to_string(),
+                reason: None,
+            },
+            ConnectionState::Connecting => JsConnectionState {
+                state: "connecting".to_string(),
+                reason: None,
+            },
+            ConnectionState::Connected => JsConnectionState {
+                state: "connected".to_string(),
+                reason: None,
+            },
+            ConnectionState::Lost(reason) => JsConnectionState {
+                state: "lost".to_string(),
+                reason: Some(reason.to_string()),
+            },
         }
     }
 }

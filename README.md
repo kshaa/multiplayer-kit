@@ -127,7 +127,7 @@ let server = Server::<MyUser>::builder()
 Connect from client:
 
 ```rust
-let conn = RoomConnection::connect(url, &ticket, room_id).await?;
+let conn = RoomConnection::connect(url, &ticket, room_id, ConnectionConfig::default()).await?;
 let channel = conn.open_channel().await?;
 channel.write(&data).await?;
 let n = channel.read(&mut buf).await?;

@@ -45,7 +45,7 @@
 
 // Re-exports from protocol
 pub use chat_protocol::{ChatChannel, ChatEvent, ChatMessage, ChatProtocol, ChatUser};
-pub use multiplayer_kit_client::{ApiClient, ClientError, RoomConnection};
+pub use multiplayer_kit_client::{ApiClient, ClientError, ConnectionConfig, RoomConnection};
 pub use multiplayer_kit_protocol::RoomId;
 
 // Re-export GameClientContext so implementers of ChatClientAdapter don't need to add helpers dep
@@ -109,4 +109,4 @@ pub use wasm::*;
 
 // Re-export for low-level access
 #[cfg(target_arch = "wasm32")]
-pub use multiplayer_kit_client::wasm_exports::{JsLobbyClient, JsRoomConnection};
+pub use multiplayer_kit_client::{JsLobbyClient, JsRoomConnection};
