@@ -43,10 +43,10 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
                     if let Some(ct) = P::channel_from_id(msg[0]) {
                         channel_type = ct;
                         tracing::info!(
-                            "Channel {:?} identified as {:?} for user {:?}",
+                            "Channel {:?} identified as {:?} for {}",
                             channel_id,
                             channel_type,
-                            user_id
+                            user
                         );
                         break 'outer;
                     }
@@ -87,8 +87,8 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
 
     if let Some(ref user) = user_ready {
         tracing::info!(
-            "User {:?} fully connected ({} channels established)",
-            user.id(),
+            "{} fully connected ({} channels established)",
+            user,
             expected_channels
         );
         let _ = event_tx
@@ -148,8 +148,8 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
 
     if let Some(ref user) = user_gone {
         tracing::info!(
-            "User {:?} disconnected (channel {:?} closed)",
-            user.id(),
+            "{} disconnected (channel {:?} closed)",
+            user,
             channel_type
         );
         let _ = event_tx

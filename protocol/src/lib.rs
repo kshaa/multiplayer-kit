@@ -4,7 +4,7 @@ use std::hash::Hash;
 /// Trait that library users implement for their user data.
 /// This data is embedded in JWTs and available during message validation.
 pub trait UserContext:
-    Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static
+    Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + std::fmt::Display + 'static
 {
     type Id: Eq + Hash + Clone + Send + Sync + Unpin + 'static + std::fmt::Debug;
     fn id(&self) -> Self::Id;

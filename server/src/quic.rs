@@ -45,7 +45,7 @@ pub async fn handle_session<T: UserContext, C: RoomConfig, Ctx: GameServerContex
             e
         })?;
 
-        tracing::info!("[WebTransport] Lobby connected: user {:?}", user.id());
+        tracing::info!("[WebTransport] Lobby connected: {}", user);
 
         let connection = session_request.accept().await?;
         handle_lobby_connection(connection, user, state).await
@@ -72,10 +72,16 @@ pub async fn handle_session<T: UserContext, C: RoomConfig, Ctx: GameServerContex
             return Err("Room not found".into());
         }
 
+        let room_name = state
+            .room_manager
+            .get_room_info(RoomId(room_id))
+            .map(|info| info.name)
+            .unwrap_or_default();
         tracing::info!(
-            "[WebTransport] Room {:?} session started: user {:?}",
+            "[WebTransport] Room {} '{}' session started: {}",
             room_id,
-            user.id()
+            room_name,
+            user
         );
 
         let connection = session_request.accept().await?;
@@ -109,7 +115,7 @@ async fn handle_lobby_connection<T: UserContext, C: RoomConfig, Ctx: GameServerC
                 match event {
                     Ok(event) => {
                         if let Err(e) = write_json_message(&mut send_stream, &event).await {
-                            tracing::info!("[WebTransport] Lobby disconnected: user {:?} ({:?})", user.id(), e);
+                            tracing::info!("[WebTransport] Lobby disconnected: {} ({:?})", user, e);
                             break;
                         }
                     }
@@ -118,7 +124,7 @@ async fn handle_lobby_connection<T: UserContext, C: RoomConfig, Ctx: GameServerC
                 }
             }
             _ = connection.closed() => {
-                tracing::info!("[WebTransport] Lobby disconnected: user {:?}", user.id());
+                tracing::info!("[WebTransport] Lobby disconnected: {}", user);
                 break;
             }
         }
@@ -139,6 +145,13 @@ async fn handle_room_connection<T: UserContext, C: RoomConfig, Ctx: GameServerCo
     user: T,
     state: Arc<QuicState<T, C, Ctx>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Get room name for logging
+    let room_name = state
+        .room_manager
+        .get_room_info(room_id)
+        .map(|info| info.name)
+        .unwrap_or_default();
+
     // Track active channel tasks
     let mut channel_tasks: Vec<(ChannelId, tokio::task::JoinHandle<()>)> = Vec::new();
 
@@ -158,7 +171,7 @@ async fn handle_room_connection<T: UserContext, C: RoomConfig, Ctx: GameServerCo
                             break;
                         };
 
-                        tracing::info!("[WebTransport] Room {:?} channel {:?} connected: user {:?}", room_id, channel_id, user.id());
+                        tracing::info!("[WebTransport] Room {:?} '{}' channel {:?} connected: {}", room_id, room_name, channel_id, user);
 
                         // Notify lobby of player count change
                         if let Some(info) = state.room_manager.get_room_info(room_id) {
@@ -183,7 +196,7 @@ async fn handle_room_connection<T: UserContext, C: RoomConfig, Ctx: GameServerCo
                 }
             }
             _ = connection.closed() => {
-                tracing::info!("[WebTransport] Room {:?} disconnected: user {:?}", room_id, user.id());
+                tracing::info!("[WebTransport] Room {:?} '{}' disconnected: {}", room_id, room_name, user);
                 break;
             }
         }

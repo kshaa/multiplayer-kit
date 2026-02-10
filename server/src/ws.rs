@@ -406,7 +406,7 @@ pub async fn lobby_ws<T: UserContext + Unpin + 'static, C: RoomConfig + 'static,
         .validate(ticket)
         .map_err(|_| actix_web::error::ErrorUnauthorized("Invalid ticket"))?;
 
-    tracing::info!("[WebSocket] Lobby connected: user {:?}", user.id());
+    tracing::info!("[WebSocket] Lobby connected: {}", user);
 
     let lobby_rx = state.lobby.subscribe();
     let actor = LobbyWsActor::new(user.id(), Arc::clone(&state.room_manager), lobby_rx);
