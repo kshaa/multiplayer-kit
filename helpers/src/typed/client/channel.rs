@@ -60,6 +60,9 @@ impl ClientConnection for SharedPtr<RoomConnection> {}
 // ============================================================================
 
 /// Open a channel and spawn the read/write loop.
+///
+/// Uses spawn_local to run the channel in a local context, allowing Rc sharing
+/// and preventing read cancellation issues.
 async fn open_and_run_channel<P: TypedProtocol, S: Spawner>(
     conn: &Connection,
     spawner: S,
@@ -70,29 +73,33 @@ async fn open_and_run_channel<P: TypedProtocol, S: Spawner>(
     // Use RoomConnectionLike trait - works because SharedPtr<T> derefs to T
     let channel = conn.inner.open_channel().await.map_err(|e| e.to_string())?;
     let channel_id_byte = P::channel_to_id(channel_type);
-    spawner.spawn(run_channel::<P, _>(
+    // Use spawn_local so channel can use Rc and nested spawn_local
+    spawner.spawn_local(run_channel::<P, _, S>(
         channel,
         channel_type,
         channel_id_byte,
         event_tx,
         write_rx,
+        spawner.clone(),
     ));
     Ok(())
 }
 
 // ============================================================================
-// Unified channel runner (single implementation for both platforms)
+// Channel runner
 // ============================================================================
 
 /// Run a single channel's read/write loop.
 ///
-/// Uses `futures::select` for concurrent read/write handling.
-async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static>(
+/// Spawns a dedicated read task to avoid cancelling reads (which loses data on WASM).
+/// Uses Rc for channel sharing since this runs in a single-threaded local context.
+async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static, S: Spawner>(
     channel: C,
     channel_type: P::Channel,
     channel_id_byte: u8,
     event_tx: mpsc::UnboundedSender<InternalEvent<P>>,
     mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    spawner: S,
 ) {
     // Send channel ID to identify this channel to the server
     let id_msg = frame_message(&[channel_id_byte]);
@@ -101,49 +108,67 @@ async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static>(
         return;
     }
 
+    // Wrap channel in Rc for sharing (safe because we're in a local/single-threaded context)
+    let channel = std::rc::Rc::new(channel);
     let mut buffer = MessageBuffer::new();
 
-    loop {
-        let read_fut = async {
-            let mut buf = vec![0u8; 64 * 1024];
-            let result = channel.read(&mut buf).await;
-            (buf, result)
-        };
-        let write_fut = write_rx.recv();
+    // Channel for read results - reads are NEVER cancelled
+    let (read_tx, mut read_rx) = mpsc::unbounded_channel::<Result<Vec<u8>, ()>>();
 
+    // Spawn dedicated read task - runs in the same local context
+    {
+        let channel = channel.clone();
+        spawner.spawn_local(async move {
+            loop {
+                let mut buf = vec![0u8; 64 * 1024];
+                match channel.read(&mut buf).await {
+                    Ok(n) if n > 0 => {
+                        buf.truncate(n);
+                        if read_tx.send(Ok(buf)).is_err() {
+                            break;
+                        }
+                    }
+                    _ => {
+                        let _ = read_tx.send(Err(()));
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Main loop - select between read results and write requests
+    loop {
+        let read_fut = read_rx.recv().fuse();
+        let write_fut = write_rx.recv().fuse();
         futures::pin_mut!(read_fut, write_fut);
 
         match futures::future::select(read_fut, write_fut).await {
-            // Read completed first
-            futures::future::Either::Left(((buf, result), _pending_write)) => {
-                match result {
-                    Ok(n) if n > 0 => {
-                        for result in buffer.push(&buf[..n]) {
+            futures::future::Either::Left((read_result, _)) => {
+                match read_result {
+                    Some(Ok(data)) => {
+                        for result in buffer.push(&data) {
                             match result {
-                                Ok(data) => match P::decode(channel_type, &data) {
+                                Ok(msg) => match P::decode(channel_type, &msg) {
                                     Ok(event) => {
                                         let _ = event_tx.send(InternalEvent::Message(event));
                                     }
-                                    Err(e) => {
-                                        tracing::warn!("Decode error: {}", e);
-                                    }
+                                    Err(_) => {}
                                 },
-                                Err(e) => {
-                                    tracing::warn!("Framing error: {}", e);
+                                Err(_) => {
                                     let _ = event_tx.send(InternalEvent::Disconnected);
                                     return;
                                 }
                             }
                         }
                     }
-                    _ => {
+                    Some(Err(())) | None => {
                         let _ = event_tx.send(InternalEvent::Disconnected);
                         return;
                     }
                 }
             }
-            // Write request received first
-            futures::future::Either::Right((write_data, _pending_read)) => {
+            futures::future::Either::Right((write_data, _)) => {
                 match write_data {
                     Some(data) => {
                         if channel.write(&data).await.is_err() {
@@ -188,7 +213,8 @@ where
     };
 
     let spawner_clone = spawner.clone();
-    spawner.spawn(async move {
+    // Use spawn_with_local_context so channels can use spawn_local internally
+    spawner.spawn_with_local_context(async move {
         run_actor_loop::<P, Ctx, F, S>(conn, game_context, actor_fn, spawner_clone, user_event_rx)
             .await;
     });

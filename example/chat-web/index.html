@@ -161,7 +161,8 @@
         <h1>chat://</h1>
 
         <div class="setup">
-            <input type="text" id="username" placeholder="username" autofocus>
+            <input type="text" id="username" placeholder="username" autofocus
+                   onkeydown="if(event.key === 'Enter') authenticate()">
             <button id="connectBtn" onclick="authenticate()">connect</button>
         </div>
 

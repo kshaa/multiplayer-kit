@@ -14,6 +14,7 @@ chat-protocol = { path = "../chat-protocol" }
 
 thiserror = "1"
 bincode = "1"
+tracing = "0.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["sync", "rt"] }
@@ -23,8 +24,9 @@ wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 futures = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["console"] }
 
 [features]
 default = ["native"]
 native = ["multiplayer-kit-client/native", "multiplayer-kit-helpers/client", "tokio/rt"]
-wasm = ["multiplayer-kit-client/wasm", "multiplayer-kit-helpers/wasm", "wasm-bindgen", "wasm-bindgen-futures", "js-sys", "futures"]
+wasm = ["multiplayer-kit-client/wasm", "multiplayer-kit-helpers/wasm", "wasm-bindgen", "wasm-bindgen-futures", "js-sys", "futures", "web-sys"]
