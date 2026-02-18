@@ -1,6 +1,6 @@
-use crate::room::{Room, RoomHandlerFactory};
+use crate::room::{QuickplayFilter, Room, RoomHandlerFactory};
 use crate::{AuthFuture, AuthRequest, GameServerContext, Server, ServerConfig};
-use multiplayer_kit_protocol::{RejectReason, RoomConfig, SimpleConfig, UserContext};
+use multiplayer_kit_protocol::{RejectReason, RoomConfig, RoomId, SimpleConfig, UserContext};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ pub struct ServerBuilder<
     handler_factory: Option<RoomHandlerFactory<T, C, Ctx>>,
     jwt_secret: Option<Vec<u8>>,
     context: Option<Ctx>,
+    quickplay_filter: Option<QuickplayFilter<C, Ctx>>,
     _phantom: PhantomData<(T, C)>,
 }
 
@@ -30,6 +31,7 @@ impl<T: UserContext + Unpin, C: RoomConfig, Ctx: GameServerContext> ServerBuilde
             handler_factory: None,
             jwt_secret: None,
             context: None,
+            quickplay_filter: None,
             _phantom: PhantomData,
         }
     }
@@ -171,6 +173,29 @@ impl<T: UserContext + Unpin, C: RoomConfig, Ctx: GameServerContext> ServerBuilde
         self
     }
 
+    /// Set a filter for quickplay room matching.
+    ///
+    /// The filter is called for each candidate room during quickplay.
+    /// Return `true` to allow joining the room, `false` to skip it.
+    /// Use this to check game-specific runtime state (e.g., game not started).
+    ///
+    /// # Example
+    /// ```ignore
+    /// .quickplay_filter(|room_id, config, ctx| {
+    ///     // Only allow joining rooms that haven't started
+    ///     ctx.rooms.get(&room_id.0)
+    ///         .map(|r| r.state.is_lobby())
+    ///         .unwrap_or(true)
+    /// })
+    /// ```
+    pub fn quickplay_filter<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(RoomId, &C, &Ctx) -> bool + Send + Sync + 'static,
+    {
+        self.quickplay_filter = Some(Box::new(filter));
+        self
+    }
+
     /// Set the room handler factory.
     ///
     /// The factory is called for each new room and receives the Room,
@@ -226,6 +251,7 @@ impl<T: UserContext + Unpin, C: RoomConfig, Ctx: GameServerContext> ServerBuilde
             handler_factory,
             jwt_secret,
             context: Arc::new(context),
+            quickplay_filter: self.quickplay_filter,
             _phantom: PhantomData,
         })
     }

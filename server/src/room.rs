@@ -222,6 +222,10 @@ impl<T: UserContext> RoomShared<T> {
 // RoomManager - manages all rooms
 // ============================================================================
 
+/// Optional filter for quickplay room matching.
+/// Returns true if the room is eligible for quickplay.
+pub type QuickplayFilter<C, Ctx> = Box<dyn Fn(RoomId, &C, &Ctx) -> bool + Send + Sync>;
+
 /// Manages all active rooms.
 pub struct RoomManager<T: UserContext, C: RoomConfig, Ctx: GameServerContext> {
     rooms: DashMap<RoomId, RoomEntry<T, C>>,
@@ -229,6 +233,7 @@ pub struct RoomManager<T: UserContext, C: RoomConfig, Ctx: GameServerContext> {
     settings: RoomSettings,
     handler_factory: RoomHandlerFactory<T, C, Ctx>,
     context: Arc<Ctx>,
+    quickplay_filter: Option<QuickplayFilter<C, Ctx>>,
 }
 
 /// Internal room entry with control handles.
@@ -264,6 +269,7 @@ impl<T: UserContext, C: RoomConfig, Ctx: GameServerContext> RoomManager<T, C, Ct
         settings: RoomSettings,
         handler_factory: RoomHandlerFactory<T, C, Ctx>,
         context: Arc<Ctx>,
+        quickplay_filter: Option<QuickplayFilter<C, Ctx>>,
     ) -> Self {
         Self {
             rooms: DashMap::new(),
@@ -271,6 +277,7 @@ impl<T: UserContext, C: RoomConfig, Ctx: GameServerContext> RoomManager<T, C, Ct
             settings,
             handler_factory,
             context,
+            quickplay_filter,
         }
     }
 
@@ -487,19 +494,29 @@ impl<T: UserContext, C: RoomConfig, Ctx: GameServerContext> RoomManager<T, C, Ct
     /// Find a room for quickplay.
     pub fn find_quickplay_room(&self, request: &serde_json::Value) -> Option<RoomId> {
         for entry in self.rooms.iter() {
+            let room_id = *entry.key();
             let player_count = entry.shared.user_count.load(Ordering::Relaxed) as usize;
             let max_players = entry.config.max_players();
 
-            // Check if joinable
+            // Check if joinable (player count)
             let is_joinable = max_players.map(|m| player_count < m).unwrap_or(true);
             if !is_joinable {
                 continue;
             }
 
-            // Check if matches quickplay criteria
-            if entry.config.matches_quickplay(request) {
-                return Some(*entry.key());
+            // Check config-level match
+            if !entry.config.matches_quickplay(request) {
+                continue;
             }
+
+            // Check custom handler if provided
+            if let Some(ref handler) = self.quickplay_filter {
+                if !handler(room_id, &entry.config, &*self.context) {
+                    continue;
+                }
+            }
+
+            return Some(room_id);
         }
         None
     }

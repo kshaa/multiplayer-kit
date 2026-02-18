@@ -28,8 +28,8 @@ pub trait RoomConfig:
         None
     }
 
-    /// Does this room match a quickplay request?
-    /// `request` is game-specific filter criteria from the client.
+    /// Does this room match a quickplay request? (Basic config-only check)
+    /// For runtime state checks, use `quickplay_match_handler` on the server builder.
     fn matches_quickplay(&self, _request: &serde_json::Value) -> bool {
         true
     }

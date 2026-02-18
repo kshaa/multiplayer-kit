@@ -10,7 +10,7 @@ pub mod ws;
 use crate::lobby::Lobby;
 use crate::quic::QuicState;
 use crate::rest::AppState;
-use crate::room::{RoomHandlerFactory, RoomManager, RoomSettings};
+use crate::room::{QuickplayFilter, RoomHandlerFactory, RoomManager, RoomSettings};
 use crate::ticket::TicketManager;
 use crate::ws::WsState;
 use actix_cors::Cors;
@@ -94,6 +94,7 @@ pub struct Server<T: UserContext + Unpin, C: RoomConfig = SimpleConfig, Ctx: Gam
     handler_factory: RoomHandlerFactory<T, C, Ctx>,
     jwt_secret: Vec<u8>,
     context: Arc<Ctx>,
+    quickplay_filter: Option<QuickplayFilter<C, Ctx>>,
     _phantom: PhantomData<(T, C)>,
 }
 
@@ -183,6 +184,7 @@ impl<T: UserContext + Unpin + 'static, C: RoomConfig + 'static, Ctx: GameServerC
             room_settings,
             self.handler_factory,
             Arc::clone(&self.context),
+            self.quickplay_filter,
         ));
         let ticket_manager = Arc::new(TicketManager::new(
             &self.jwt_secret,
