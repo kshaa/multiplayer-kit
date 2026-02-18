@@ -121,13 +121,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(user)
         })
         // Typed actor - handles events with automatic framing and serialization
-        // Now includes game context generic parameter
         .room_handler(with_typed_actor::<
             ChatUser,
             ChatProtocol,
             ChatRoomConfig,
             ChatServerContext,
-            _,
             _,
         >(chat_actor))
         .build()
@@ -140,8 +138,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Chat room actor - receives typed events, one at a time.
 ///
-/// Now has access to the game context via `ctx.game_context()`.
-async fn chat_actor(
+/// **Synchronous and non-blocking.** Access game context via `ctx.game_context()`.
+fn chat_actor(
     ctx: TypedContext<ChatUser, ChatProtocol, ChatServerContext>,
     event: TypedEvent<ChatUser, ChatProtocol>,
     config: Arc<ChatRoomConfig>,
@@ -164,7 +162,7 @@ async fn chat_actor(
                 "*** {} joined '{}' ***",
                 user.username, config.name
             )));
-            ctx.broadcast(&msg).await;
+            ctx.broadcast(&msg);
         }
 
         TypedEvent::UserDisconnected(user) => {
@@ -181,7 +179,7 @@ async fn chat_actor(
                 "*** {} left the chat ***",
                 user.username
             )));
-            ctx.broadcast(&msg).await;
+            ctx.broadcast(&msg);
         }
 
         TypedEvent::Message {
@@ -206,7 +204,7 @@ async fn chat_actor(
                 username: sender.username,
                 content,
             });
-            ctx.broadcast(&msg).await;
+            ctx.broadcast(&msg);
         }
 
         TypedEvent::Message { .. } => {

@@ -140,19 +140,19 @@ impl<T: UserContext> Room<T> {
         }
     }
 
-    /// Broadcast to all channels.
-    pub async fn broadcast(&self, data: &[u8]) {
-        self.shared.broadcast(data).await;
+    /// Broadcast to all channels. Non-blocking (uses try_send).
+    pub fn broadcast(&self, data: &[u8]) {
+        self.shared.broadcast(data);
     }
 
-    /// Broadcast to all channels except one.
-    pub async fn broadcast_except(&self, exclude: ChannelId, data: &[u8]) {
-        self.shared.broadcast_except(exclude, data).await;
+    /// Broadcast to all channels except one. Non-blocking.
+    pub fn broadcast_except(&self, exclude: ChannelId, data: &[u8]) {
+        self.shared.broadcast_except(exclude, data);
     }
 
-    /// Broadcast to specific channels.
-    pub async fn send_to(&self, channels: &[ChannelId], data: &[u8]) {
-        self.shared.send_to(channels, data).await;
+    /// Broadcast to specific channels. Non-blocking.
+    pub fn send_to(&self, channels: &[ChannelId], data: &[u8]) {
+        self.shared.send_to(channels, data);
     }
 
     /// Get all channel IDs.
@@ -173,19 +173,19 @@ pub struct RoomHandle<T: UserContext> {
 }
 
 impl<T: UserContext> RoomHandle<T> {
-    /// Broadcast to all channels.
-    pub async fn broadcast(&self, data: &[u8]) {
-        self.shared.broadcast(data).await;
+    /// Broadcast to all channels. Non-blocking.
+    pub fn broadcast(&self, data: &[u8]) {
+        self.shared.broadcast(data);
     }
 
-    /// Broadcast to all channels except one.
-    pub async fn broadcast_except(&self, exclude: ChannelId, data: &[u8]) {
-        self.shared.broadcast_except(exclude, data).await;
+    /// Broadcast to all channels except one. Non-blocking.
+    pub fn broadcast_except(&self, exclude: ChannelId, data: &[u8]) {
+        self.shared.broadcast_except(exclude, data);
     }
 
-    /// Broadcast to specific channels.
-    pub async fn send_to(&self, channels: &[ChannelId], data: &[u8]) {
-        self.shared.send_to(channels, data).await;
+    /// Broadcast to specific channels. Non-blocking.
+    pub fn send_to(&self, channels: &[ChannelId], data: &[u8]) {
+        self.shared.send_to(channels, data);
     }
 
     /// Get all channel IDs.
@@ -195,37 +195,25 @@ impl<T: UserContext> RoomHandle<T> {
 }
 
 impl<T: UserContext> RoomShared<T> {
-    async fn broadcast(&self, data: &[u8]) {
-        // Collect senders to avoid holding DashMap refs across await
-        let senders: Vec<_> = self
-            .channels
-            .iter()
-            .map(|r| r.value().write_tx.clone())
-            .collect();
-        for tx in senders {
-            let _ = tx.send(data.to_vec()).await;
+    fn broadcast(&self, data: &[u8]) {
+        for entry in self.channels.iter() {
+            let _ = entry.value().write_tx.try_send(data.to_vec());
         }
     }
 
-    async fn broadcast_except(&self, exclude: ChannelId, data: &[u8]) {
-        let senders: Vec<_> = self
-            .channels
-            .iter()
-            .filter(|r| *r.key() != exclude)
-            .map(|r| r.value().write_tx.clone())
-            .collect();
-        for tx in senders {
-            let _ = tx.send(data.to_vec()).await;
+    fn broadcast_except(&self, exclude: ChannelId, data: &[u8]) {
+        for entry in self.channels.iter() {
+            if *entry.key() != exclude {
+                let _ = entry.value().write_tx.try_send(data.to_vec());
+            }
         }
     }
 
-    async fn send_to(&self, channel_ids: &[ChannelId], data: &[u8]) {
-        let senders: Vec<_> = channel_ids
-            .iter()
-            .filter_map(|id| self.channels.get(id).map(|r| r.value().write_tx.clone()))
-            .collect();
-        for tx in senders {
-            let _ = tx.send(data.to_vec()).await;
+    fn send_to(&self, channel_ids: &[ChannelId], data: &[u8]) {
+        for id in channel_ids {
+            if let Some(entry) = self.channels.get(id) {
+                let _ = entry.value().write_tx.try_send(data.to_vec());
+            }
         }
     }
 }
@@ -380,17 +368,20 @@ impl<T: UserContext, C: RoomConfig, Ctx: GameServerContext> RoomManager<T, C, Ct
         oneshot::Receiver<()>,
     )> {
         let entry = self.rooms.get(&room_id)?;
+        let user_id = user.id();
 
-        // Check max players
+        // Check max players - but only for NEW users, not existing users opening more channels
         if let Some(max) = entry.config.max_players() {
-            let current = entry.shared.user_count.load(Ordering::Relaxed) as usize;
-            if current >= max {
-                return None; // Room full
+            let is_existing_user = entry.shared.user_channels.contains_key(&user_id);
+            if !is_existing_user {
+                let current = entry.shared.user_count.load(Ordering::Relaxed) as usize;
+                if current >= max {
+                    return None; // Room full
+                }
             }
         }
 
         let channel_id = ChannelId(entry.next_channel_id.fetch_add(1, Ordering::SeqCst));
-        let user_id = user.id();
 
         // Create channel pairs
         let (read_tx, read_rx) = mpsc::channel::<Vec<u8>>(256); // Transport → Handler

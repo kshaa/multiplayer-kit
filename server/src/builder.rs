@@ -189,12 +189,12 @@ impl<T: UserContext + Unpin, C: RoomConfig, Ctx: GameServerContext> ServerBuilde
     ///                 tokio::spawn(async move {
     ///                     while let Some(data) = channel.read().await {
     ///                         // ctx.history.record(&data); // Use game context
-    ///                         handle.broadcast_except(channel.id, &data).await;
+    ///                         handle.broadcast_except(channel.id, &data);
     ///                     }
     ///                 });
     ///             }
     ///             Accept::Closing => {
-    ///                 room.broadcast(b"Room closing...").await;
+    ///                 room.broadcast(b"Room closing...");
     ///                 // ctx.history.persist().await; // Save on close
     ///                 break;
     ///             }

@@ -199,10 +199,10 @@ impl TypedProtocol for MyProtocol {
 
 ### Server Actor
 
-The actor function receives typed events and a context for sending:
+The actor function is **synchronous and non-blocking**. Use `tokio::spawn` for async work:
 
 ```rust
-async fn my_actor(
+fn my_actor(
     ctx: TypedContext<MyUser, MyProtocol>,
     event: TypedEvent<MyUser, MyProtocol>,
     config: Arc<MyRoomConfig>,
@@ -216,10 +216,10 @@ async fn my_actor(
         }
         TypedEvent::Message { sender, channel, event } => {
             // Handle typed message
-            ctx.broadcast(&event).await; // Send to all users
+            ctx.broadcast(&event); // Send to all users (non-blocking)
         }
         TypedEvent::Internal(event) => {
-            // Self-sent event (from ctx.self_tx)
+            // Self-sent event (from spawned tasks via ctx.self_tx())
         }
         TypedEvent::Shutdown => {
             // Room closing, cleanup
@@ -228,10 +228,10 @@ async fn my_actor(
 }
 ```
 
-**Context methods:**
+**Context methods (all non-blocking):**
 - `ctx.broadcast(&event)` - Send to all connected users
-- `ctx.send_to_user(user_id, &event)` - Send to specific user
-- `ctx.self_tx.send(event)` - Send event to self (for timers, async operations)
+- `ctx.send_to_user(&user, &event)` - Send to specific user
+- `ctx.self_tx()` - Get sender for internal events (use in spawned tasks)
 - `ctx.connected_users()` - Get list of connected user IDs
 
 ### Client Actor

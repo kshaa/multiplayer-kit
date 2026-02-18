@@ -89,23 +89,22 @@ impl<T: UserContext, P: TypedProtocol, Ctx: GameServerContext> TypedContext<T, P
         &self.game_context
     }
 
-    /// Broadcast event to all channels of the event's type.
-    pub async fn broadcast(&self, event: &P::Event) {
+    /// Broadcast event to all channels of the event's type. Non-blocking.
+    pub fn broadcast(&self, event: &P::Event) {
         if let Ok((channel_type, data)) = P::encode(event) {
             let framed = frame_message(&data);
-            // Collect matching channel IDs to avoid holding DashMap ref across await
             let channel_ids: Vec<_> = self
                 .user_channels
                 .iter()
                 .filter(|r| r.value().1 == channel_type)
                 .map(|r| *r.key())
                 .collect();
-            self.handle.send_to(&channel_ids, &framed).await;
+            self.handle.send_to(&channel_ids, &framed);
         }
     }
 
-    /// Broadcast event to all channels except sender's channel.
-    pub async fn broadcast_except(&self, exclude: ChannelId, event: &P::Event) {
+    /// Broadcast event to all channels except sender's channel. Non-blocking.
+    pub fn broadcast_except(&self, exclude: ChannelId, event: &P::Event) {
         if let Ok((channel_type, data)) = P::encode(event) {
             let framed = frame_message(&data);
             let channel_ids: Vec<_> = self
@@ -114,12 +113,12 @@ impl<T: UserContext, P: TypedProtocol, Ctx: GameServerContext> TypedContext<T, P
                 .filter(|r| r.value().1 == channel_type && *r.key() != exclude)
                 .map(|r| *r.key())
                 .collect();
-            self.handle.send_to(&channel_ids, &framed).await;
+            self.handle.send_to(&channel_ids, &framed);
         }
     }
 
-    /// Send to a specific user (all their channels of the event's type).
-    pub async fn send_to_user(&self, user: &T, event: &P::Event) {
+    /// Send to a specific user (all their channels of the event's type). Non-blocking.
+    pub fn send_to_user(&self, user: &T, event: &P::Event) {
         if let Ok((channel_type, data)) = P::encode(event) {
             let framed = frame_message(&data);
             let channel_ids: Vec<_> = self
@@ -128,7 +127,7 @@ impl<T: UserContext, P: TypedProtocol, Ctx: GameServerContext> TypedContext<T, P
                 .filter(|r| r.value().1 == channel_type && r.value().0.id() == user.id())
                 .map(|r| *r.key())
                 .collect();
-            self.handle.send_to(&channel_ids, &framed).await;
+            self.handle.send_to(&channel_ids, &framed);
         }
     }
 

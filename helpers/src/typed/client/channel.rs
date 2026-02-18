@@ -101,6 +101,7 @@ async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static, S: Spawner>(
     mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     spawner: S,
 ) {
+    tracing::info!("[Channel {}] run_channel started", channel_id_byte);
     // Send channel ID to identify this channel to the server
     let id_msg = frame_message(&[channel_id_byte]);
     if channel.write(&id_msg).await.is_err() {
@@ -118,22 +119,33 @@ async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static, S: Spawner>(
     // Spawn dedicated read task - runs in the same local context
     {
         let channel = channel.clone();
+        let channel_id = channel_id_byte;
         spawner.spawn_local(async move {
+            tracing::info!("[Channel {}] Read task started", channel_id);
             loop {
                 let mut buf = vec![0u8; 64 * 1024];
                 match channel.read(&mut buf).await {
                     Ok(n) if n > 0 => {
+                        tracing::trace!("[Channel {}] Read {} bytes", channel_id, n);
                         buf.truncate(n);
                         if read_tx.send(Ok(buf)).is_err() {
+                            tracing::info!("[Channel {}] Read task: receiver dropped", channel_id);
                             break;
                         }
                     }
-                    _ => {
+                    Ok(n) => {
+                        tracing::info!("[Channel {}] Read returned {} (EOF?)", channel_id, n);
+                        let _ = read_tx.send(Err(()));
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::info!("[Channel {}] Read error: {:?}", channel_id, e);
                         let _ = read_tx.send(Err(()));
                         break;
                     }
                 }
             }
+            tracing::info!("[Channel {}] Read task ended", channel_id);
         });
     }
 
@@ -151,9 +163,12 @@ async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static, S: Spawner>(
                             match result {
                                 Ok(msg) => match P::decode(channel_type, &msg) {
                                     Ok(event) => {
+                                        tracing::trace!("[Channel {}] Decoded message, forwarding to actor", channel_id_byte);
                                         let _ = event_tx.send(InternalEvent::Message(event));
                                     }
-                                    Err(_) => {}
+                                    Err(e) => {
+                                        tracing::warn!("[Channel {}] Failed to decode message: {:?}", channel_id_byte, e);
+                                    }
                                 },
                                 Err(_) => {
                                     let _ = event_tx.send(InternalEvent::Disconnected);
@@ -243,6 +258,9 @@ async fn run_actor_loop<P, Ctx, F, S>(
 
     // Open all channels
     for &channel_type in channels_to_open {
+        let channel_id = P::channel_to_id(channel_type);
+        tracing::info!("[Typed] Opening channel {} (id={})", std::any::type_name::<P::Channel>(), channel_id);
+        
         let (write_tx, write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         channel_senders.insert(channel_type, write_tx);
 
@@ -254,6 +272,8 @@ async fn run_actor_loop<P, Ctx, F, S>(
             write_rx,
         )
         .await;
+        
+        tracing::info!("[Typed] Channel {} opened, result={}", channel_id, result.is_ok());
 
         if let Err(e) = result {
             tracing::error!("Failed to open channel: {}", e);
@@ -266,6 +286,15 @@ async fn run_actor_loop<P, Ctx, F, S>(
             actor_fn(&ctx, TypedClientEvent::Disconnected, &spawner);
             return;
         }
+    }
+
+    // Yield to let spawned read tasks start before we emit Connected
+    // This ensures they're ready to receive messages from the server
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tracing::info!("[Typed] All channels opened, yielding to let read tasks start");
+        tokio::task::yield_now().await;
+        tracing::info!("[Typed] Yield complete, emitting Connected");
     }
 
     let ctx = TypedClientContext {

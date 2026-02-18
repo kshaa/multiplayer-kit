@@ -19,6 +19,9 @@ use tokio::sync::mpsc;
 /// - `TypedEvent<T, P>` the current event
 /// - `Arc<C>` the room config (shared, immutable)
 ///
+/// **The actor function must be synchronous and never block.**
+/// Use `tokio::spawn` for any async work, and `ctx.self_tx()` to send results back.
+///
 /// # Example
 ///
 /// ```ignore
@@ -28,10 +31,17 @@ use tokio::sync::mpsc;
 ///     MyRoomConfig,
 ///     MyGameContext,
 ///     _,
-///     _,
 /// >(my_actor))
+///
+/// fn my_actor(
+///     ctx: TypedContext<MyUser, MyProtocol, MyGameContext>,
+///     event: TypedEvent<MyUser, MyProtocol>,
+///     config: Arc<MyRoomConfig>,
+/// ) {
+///     // Handle event synchronously, spawn tasks for async work
+/// }
 /// ```
-pub fn with_typed_actor<T, P, C, Ctx, F, Fut>(
+pub fn with_typed_actor<T, P, C, Ctx, F>(
     actor_fn: F,
 ) -> impl Fn(
     multiplayer_kit_server::Room<T>,
@@ -47,20 +57,19 @@ where
     P: TypedProtocol,
     C: multiplayer_kit_protocol::RoomConfig + 'static,
     Ctx: GameServerContext,
-    F: Fn(TypedContext<T, P, Ctx>, TypedEvent<T, P>, Arc<C>) -> Fut + Send + Sync + Clone + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
+    F: Fn(TypedContext<T, P, Ctx>, TypedEvent<T, P>, Arc<C>) + Send + Sync + Clone + 'static,
 {
     let actor_fn = Arc::new(actor_fn);
     move |room: multiplayer_kit_server::Room<T>, config: C, ctx: Arc<Ctx>| {
         let actor_fn = Arc::clone(&actor_fn);
         Box::pin(async move {
-            run_typed_server_actor::<T, P, C, Ctx, F, Fut>(room, config, ctx, actor_fn).await;
+            run_typed_server_actor::<T, P, C, Ctx, F>(room, config, ctx, actor_fn).await;
         })
     }
 }
 
 /// Internal: run the typed server actor loop.
-async fn run_typed_server_actor<T, P, C, Ctx, F, Fut>(
+async fn run_typed_server_actor<T, P, C, Ctx, F>(
     mut room: multiplayer_kit_server::Room<T>,
     config: C,
     game_context: Arc<Ctx>,
@@ -70,8 +79,7 @@ async fn run_typed_server_actor<T, P, C, Ctx, F, Fut>(
     P: TypedProtocol,
     C: multiplayer_kit_protocol::RoomConfig + 'static,
     Ctx: GameServerContext,
-    F: Fn(TypedContext<T, P, Ctx>, TypedEvent<T, P>, Arc<C>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
+    F: Fn(TypedContext<T, P, Ctx>, TypedEvent<T, P>, Arc<C>) + Send + Sync + 'static,
 {
     let config = Arc::new(config);
     use multiplayer_kit_server::Accept;
@@ -117,7 +125,7 @@ async fn run_typed_server_actor<T, P, C, Ctx, F, Fut>(
                         });
                     }
                     Some(Accept::Closing) => {
-                        actor_fn(ctx.clone(), TypedEvent::Shutdown, Arc::clone(&config)).await;
+                        actor_fn(ctx.clone(), TypedEvent::Shutdown, Arc::clone(&config));
                         break;
                     }
                     None => break,
@@ -126,10 +134,10 @@ async fn run_typed_server_actor<T, P, C, Ctx, F, Fut>(
             event = event_rx.recv() => {
                 match event {
                     Some(ServerInternalEvent::UserReady(user)) => {
-                        actor_fn(ctx.clone(), TypedEvent::UserConnected(user), Arc::clone(&config)).await;
+                        actor_fn(ctx.clone(), TypedEvent::UserConnected(user), Arc::clone(&config));
                     }
                     Some(ServerInternalEvent::UserGone(user)) => {
-                        actor_fn(ctx.clone(), TypedEvent::UserDisconnected(user), Arc::clone(&config)).await;
+                        actor_fn(ctx.clone(), TypedEvent::UserDisconnected(user), Arc::clone(&config));
                     }
                     Some(ServerInternalEvent::Message { sender, channel_type, event }) => {
                         actor_fn(
@@ -140,15 +148,14 @@ async fn run_typed_server_actor<T, P, C, Ctx, F, Fut>(
                                 event,
                             },
                             Arc::clone(&config),
-                        )
-                        .await;
+                        );
                     }
                     None => break,
                 }
             }
             self_event = self_rx.recv() => {
                 if let Some(event) = self_event {
-                    actor_fn(ctx.clone(), TypedEvent::Internal(event), Arc::clone(&config)).await;
+                    actor_fn(ctx.clone(), TypedEvent::Internal(event), Arc::clone(&config));
                 }
             }
         }
