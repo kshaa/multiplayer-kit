@@ -5,44 +5,44 @@
 //! - Typed channels with automatic serialization
 //! - Pure actor abstraction (testable, type-safe message routing)
 
-mod framing;
+/// Utility modules (framing, platform abstractions, typed protocol).
+pub mod utils;
 
 /// Pure actor module - generic, testable actor abstraction.
-/// Not integrated with typed module yet.
 pub mod actor;
 
-pub use framing::{FramingError, MessageBuffer, frame_message};
-
-// Typed module - available for server and client (wasm or native)
-#[cfg(any(feature = "server", feature = "client", feature = "wasm"))]
-mod typed;
-
-// Common types always available when typed module is
-#[cfg(any(feature = "server", feature = "client", feature = "wasm"))]
-pub use typed::{DecodeError, EncodeError, TypedProtocol};
-
-// Conditional Send/Sync traits (used for cross-platform compatibility)
+/// Async task spawning abstractions.
 #[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
-pub use typed::{MaybeSend, MaybeSync};
+pub mod spawning;
 
-// Server-specific typed exports
+/// Server-side typed actor.
 #[cfg(feature = "server")]
-pub use typed::{TypedContext, TypedEvent, with_typed_actor};
+pub mod server_actor;
 
-// Client-specific typed exports (unified for native and WASM)
+/// Client-side typed actor.
 #[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
-pub use typed::{
-    ActorHandle, ActorSendError, ClientConnection, GameClientContext, SharedPtr,
-    TypedActorSender, TypedClientContext, TypedClientEvent, run_typed_client_actor,
+pub mod client_actor;
+
+// Re-exports for convenience
+pub use utils::{DecodeError, EncodeError, FramingError, MessageBuffer, TypedProtocol, frame_message};
+
+#[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
+pub use utils::{GameClientContext, MaybeSend, MaybeSync};
+
+#[cfg(feature = "server")]
+pub use server_actor::{TypedContext, TypedEvent, with_typed_actor};
+
+#[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
+pub use client_actor::{
+    ActorHandle, ActorSendError, ClientConnection, SharedPtr, TypedActorSender,
+    TypedClientContext, TypedClientEvent, run_typed_client_actor,
 };
 
-// Spawner trait and implementations
 #[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
-pub use typed::Spawner;
+pub use spawning::Spawner;
 
 #[cfg(feature = "client")]
-pub use typed::TokioSpawner;
+pub use spawning::TokioSpawner;
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-pub use typed::WasmSpawner;
-
+pub use spawning::WasmSpawner;

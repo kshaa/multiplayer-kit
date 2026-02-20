@@ -1,7 +1,7 @@
 //! Server actor wrapper and main loop.
 
 use super::{ServerInternalEvent, TypedContext, TypedEvent};
-use crate::typed::TypedProtocol;
+use crate::utils::TypedProtocol;
 use dashmap::DashMap;
 use multiplayer_kit_protocol::UserContext;
 use multiplayer_kit_server::GameServerContext;

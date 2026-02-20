@@ -2,7 +2,7 @@
 //!
 //! Provides the `Spawner` trait and built-in implementations for tokio and WASM.
 
-use super::platform::{MaybeSend, MaybeSync};
+use crate::utils::{MaybeSend, MaybeSync};
 
 /// Trait for spawning async tasks.
 ///

@@ -24,8 +24,7 @@
 mod actor;
 mod channel;
 
-use super::TypedProtocol;
-use crate::framing::frame_message;
+use crate::utils::{TypedProtocol, frame_message};
 use dashmap::DashMap;
 use multiplayer_kit_protocol::{ChannelId, RoomId, UserContext};
 use multiplayer_kit_server::GameServerContext;

@@ -5,10 +5,8 @@
 
 mod channel;
 
-use super::platform::{GameClientContext, MaybeSend, MaybeSync};
-use super::spawner::Spawner;
-use super::TypedProtocol;
-use crate::framing::frame_message;
+use crate::utils::{GameClientContext, MaybeSend, MaybeSync, TypedProtocol, frame_message};
+use crate::spawning::Spawner;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use tokio::sync::mpsc;
@@ -123,7 +121,7 @@ pub struct TypedClientContext<P: TypedProtocol, Ctx: GameClientContext = ()> {
 
 impl<P: TypedProtocol, Ctx: GameClientContext> TypedClientContext<P, Ctx> {
     /// Send an event (routed to correct channel by type).
-    pub fn send(&self, event: &P::Event) -> Result<(), super::EncodeError> {
+    pub fn send(&self, event: &P::Event) -> Result<(), crate::utils::EncodeError> {
         let (channel_type, data) = P::encode(event)?;
         let framed = frame_message(&data);
         if let Some(tx) = self.channels.get(&channel_type) {

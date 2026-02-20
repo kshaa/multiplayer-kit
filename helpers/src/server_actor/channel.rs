@@ -1,8 +1,7 @@
 //! Channel handling for server-side typed actors.
 
 use super::ServerInternalEvent;
-use crate::framing::MessageBuffer;
-use crate::typed::TypedProtocol;
+use crate::utils::{MessageBuffer, TypedProtocol};
 use dashmap::DashMap;
 use multiplayer_kit_protocol::{ChannelId, UserContext};
 use std::collections::HashMap;

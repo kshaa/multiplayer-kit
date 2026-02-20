@@ -6,10 +6,8 @@ use super::{
     make_shared, ActorHandle, InternalEvent, SharedPtr, TypedActorSender, TypedClientContext,
     TypedClientEvent,
 };
-use crate::framing::{frame_message, MessageBuffer};
-use crate::typed::platform::{GameClientContext, MaybeSend, MaybeSync};
-use crate::typed::spawner::Spawner;
-use crate::typed::TypedProtocol;
+use crate::utils::{frame_message, GameClientContext, MaybeSend, MaybeSync, MessageBuffer, TypedProtocol};
+use crate::spawning::Spawner;
 use futures::FutureExt;
 use multiplayer_kit_client::{ChannelIO, RoomConnection};
 use std::collections::HashMap;
