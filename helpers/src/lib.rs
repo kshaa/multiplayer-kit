@@ -3,8 +3,13 @@
 //! Provides optional abstractions on top of the raw channel API:
 //! - Message framing (length-prefixed)
 //! - Typed channels with automatic serialization
+//! - Pure actor abstraction (testable, type-safe message routing)
 
 mod framing;
+
+/// Pure actor module - generic, testable actor abstraction.
+/// Not integrated with typed module yet.
+pub mod actor;
 
 pub use framing::{FramingError, MessageBuffer, frame_message};
 
