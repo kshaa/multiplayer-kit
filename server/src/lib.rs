@@ -38,7 +38,7 @@ use wtransport::tls::Sha256DigestFmt;
 /// The context is passed to:
 /// - Auth handlers (for external service lookups)
 /// - Room handlers (for persisting game state/results)
-/// - Typed actors via `TypedContext::game_context()`
+/// - Actor extras via `get_room_extras()`
 ///
 /// # Example
 ///
@@ -49,7 +49,17 @@ use wtransport::tls::Sha256DigestFmt;
 ///     metrics: MetricsRecorder,
 /// }
 ///
-/// impl GameServerContext for MyGameContext {}
+/// struct MyRoomExtras {
+///     fireworks: FireworksTrigger,
+/// }
+///
+/// impl GameServerContext for MyGameContext {
+///     type RoomExtras = MyRoomExtras;
+///     
+///     fn get_room_extras(&self, _room_id: RoomId) -> Self::RoomExtras {
+///         MyRoomExtras { fireworks: self.fireworks.clone() }
+///     }
+/// }
 ///
 /// // Use in server:
 /// let ctx = MyGameContext { ... };
@@ -59,15 +69,23 @@ use wtransport::tls::Sha256DigestFmt;
 ///         // ctx.db is available here
 ///         Ok(user)
 ///     })
-///     .room_handler(|room, config, ctx| async move {
-///         // ctx.history is available here
-///     })
+///     .room_handler(with_server_actor::<MyActor, ...>())
 ///     .build()
 /// ```
-pub trait GameServerContext: Send + Sync + 'static {}
+pub trait GameServerContext: Send + Sync + 'static {
+    /// Extra tools/services passed to actor's handle and shutdown methods.
+    type RoomExtras: Send + 'static;
+
+    /// Get room-specific extras for an actor.
+    fn get_room_extras(&self, room_id: RoomId) -> Self::RoomExtras;
+}
 
 /// Default implementation for unit type (no context needed).
-impl GameServerContext for () {}
+impl GameServerContext for () {
+    type RoomExtras = ();
+
+    fn get_room_extras(&self, _room_id: RoomId) -> Self::RoomExtras {}
+}
 
 pub use builder::ServerBuilder;
 pub use error::ServerError;

@@ -10,4 +10,5 @@ members = [
     "example/chat-cli",
     "example/chat-client",
     "example/chat-protocol",
+    "example/chat-tests",
 ]

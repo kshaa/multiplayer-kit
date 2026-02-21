@@ -3,6 +3,10 @@ name = "chat-server"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "chat_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "chat-server"
 path = "src/main.rs"

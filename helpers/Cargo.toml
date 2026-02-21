@@ -9,6 +9,7 @@ multiplayer-kit-client = { path = "../client", optional = true, default-features
 multiplayer-kit-server = { path = "../server", optional = true }
 thiserror = "1"
 tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["sync", "macros", "rt"], optional = true }
 dashmap = { version = "6", optional = true }
 

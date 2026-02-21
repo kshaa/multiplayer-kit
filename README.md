@@ -110,18 +110,19 @@ impl UserContext for MyUser {
 }
 ```
 
-Build the server with typed actors:
+Build the server with actors:
 
 ```rust
-let server = Server::<MyUser>::builder()
+let server = Server::<MyUser, MyRoomConfig, MyServerContext>::builder()
     .jwt_secret(b"secret")
-    .auth_handler(|req| async move {
+    .context(my_context)
+    .auth_handler(|req, ctx| async move {
         Ok(MyUser { user_id: 1, username: "alice".into() })
     })
-    .room_handler(with_typed_actor::<MyUser, MyProtocol, _, _>(my_actor))
-    .build()?
-    .run()
-    .await?;
+    .room_handler(with_server_actor::<MyActor, MyUser, MyMessage, MyRoomConfig, MyServerContext>())
+    .build()?;
+
+server.run().await?;
 ```
 
 Connect from client:
@@ -133,16 +134,18 @@ channel.write(&data).await?;
 let n = channel.read(&mut buf).await?;
 ```
 
-## Typed Actors & Channels
+## Actors & Channels
 
-The `helpers` crate provides `with_typed_actor` - a wrapper that handles:
+The `helpers` crate provides a generic `Actor` trait and glue code that handles:
 
 1. **Message framing** - Length-prefixed messages over raw byte streams
 2. **Channel typing** - Each channel identifies itself with a type byte on first message
 3. **User connection tracking** - Users are "connected" when all expected channels are established
-4. **Automatic serialization** - Encode/decode via your `TypedProtocol` implementation
+4. **Automatic serialization** - Encode/decode via your `ChannelMessage` implementation
 
-### Defining a Protocol
+### Defining Messages
+
+Messages implement `ChannelMessage` directly (no separate protocol type):
 
 ```rust
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -151,25 +154,34 @@ pub enum MyChannel {
     GameState,
 }
 
-pub enum MyEvent {
+#[derive(Clone, Debug)]
+pub enum MyMessage {
     Chat(ChatMessage),
     GameState(GameUpdate),
 }
 
-pub struct MyProtocol;
-
-impl TypedProtocol for MyProtocol {
+impl ChannelMessage for MyMessage {
     type Channel = MyChannel;
-    type Event = MyEvent;
 
-    fn channel_to_id(channel: &Self::Channel) -> u8 {
+    fn channel(&self) -> Option<MyChannel> {
+        match self {
+            MyMessage::Chat(_) => Some(MyChannel::Chat),
+            MyMessage::GameState(_) => Some(MyChannel::GameState),
+        }
+    }
+
+    fn all_channels() -> &'static [MyChannel] {
+        &[MyChannel::Chat, MyChannel::GameState]
+    }
+
+    fn channel_to_id(channel: MyChannel) -> u8 {
         match channel {
             MyChannel::Chat => 0,
             MyChannel::GameState => 1,
         }
     }
 
-    fn channel_from_id(id: u8) -> Option<Self::Channel> {
+    fn channel_from_id(id: u8) -> Option<MyChannel> {
         match id {
             0 => Some(MyChannel::Chat),
             1 => Some(MyChannel::GameState),
@@ -177,21 +189,17 @@ impl TypedProtocol for MyProtocol {
         }
     }
 
-    fn all_channels() -> &'static [Self::Channel] {
-        &[MyChannel::Chat, MyChannel::GameState]
-    }
-
-    fn decode(channel: Self::Channel, data: &[u8]) -> Result<Self::Event, DecodeError> {
-        match channel {
-            MyChannel::Chat => Ok(MyEvent::Chat(bincode::deserialize(data)?)),
-            MyChannel::GameState => Ok(MyEvent::GameState(bincode::deserialize(data)?)),
+    fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+        match self {
+            MyMessage::Chat(msg) => bincode::serialize(msg).map_err(|e| EncodeError::Serialize(e.to_string())),
+            MyMessage::GameState(upd) => bincode::serialize(upd).map_err(|e| EncodeError::Serialize(e.to_string())),
         }
     }
 
-    fn encode(event: &Self::Event) -> Result<(Self::Channel, Vec<u8>), EncodeError> {
-        match event {
-            MyEvent::Chat(msg) => Ok((MyChannel::Chat, bincode::serialize(msg)?)),
-            MyEvent::GameState(upd) => Ok((MyChannel::GameState, bincode::serialize(upd)?)),
+    fn decode(channel: MyChannel, data: &[u8]) -> Result<Self, DecodeError> {
+        match channel {
+            MyChannel::Chat => Ok(MyMessage::Chat(bincode::deserialize(data).map_err(|e| DecodeError::Deserialize(e.to_string()))?)),
+            MyChannel::GameState => Ok(MyMessage::GameState(bincode::deserialize(data).map_err(|e| DecodeError::Deserialize(e.to_string()))?)),
         }
     }
 }
@@ -199,68 +207,134 @@ impl TypedProtocol for MyProtocol {
 
 ### Server Actor
 
-The actor function is **synchronous and non-blocking**. Use `tokio::spawn` for async work:
+Server actors implement the `Actor` trait. The `handle` method is **synchronous** - outputs are collected via a type-safe `Sink`:
 
 ```rust
-fn my_actor(
-    ctx: TypedContext<MyUser, MyProtocol>,
-    event: TypedEvent<MyUser, MyProtocol>,
-    config: Arc<MyRoomConfig>,
-) {
-    match event {
-        TypedEvent::UserConnected(user) => {
-            println!("{} joined", user.username);
+struct MyServerActor;
+
+impl ActorProtocol for MyServerActor {
+    type ActorId = ServerSource<MyUser>;
+    type Message = ServerMessage<MyMessage>;
+}
+
+impl<S> Actor<S> for MyServerActor
+where
+    S: Sink<UserTarget<MyUser, MyMessage>> + Sink<SelfTarget<MyMessage>>,
+{
+    type Config = ServerActorConfig<MyRoomConfig>;
+    type State = MyState;
+    type Extras = MyExtras;
+
+    fn startup(config: Self::Config) -> Self::State {
+        MyState { /* initial state */ }
+    }
+
+    fn handle(
+        state: &mut Self::State,
+        extras: &mut Self::Extras,
+        message: AddressedMessage<Self::ActorId, Self::Message>,
+        sink: &mut S,
+    ) {
+        match (&message.from, &message.content) {
+            (ServerSource::User(user), ServerMessage::UserConnected) => {
+                // User joined
+            }
+            (ServerSource::User(user), ServerMessage::UserDisconnected) => {
+                // User left
+            }
+            (ServerSource::User(user), ServerMessage::Message(msg)) => {
+                // Handle message, send responses via sink
+                Sink::<UserTarget<MyUser, MyMessage>>::send(
+                    sink,
+                    UserDestination::Broadcast,
+                    response_msg,
+                );
+            }
+            (ServerSource::Internal, ServerMessage::Message(msg)) => {
+                // Self-scheduled message
+            }
+            _ => {}
         }
-        TypedEvent::UserDisconnected(user) => {
-            println!("{} left", user.username);
-        }
-        TypedEvent::Message { sender, channel, event } => {
-            // Handle typed message
-            ctx.broadcast(&event); // Send to all users (non-blocking)
-        }
-        TypedEvent::Internal(event) => {
-            // Self-sent event (from spawned tasks via ctx.self_tx())
-        }
-        TypedEvent::Shutdown => {
-            // Room closing, cleanup
-        }
+    }
+
+    fn shutdown(state: &mut Self::State, extras: &mut Self::Extras) {
+        // Cleanup
     }
 }
 ```
 
-**Context methods (all non-blocking):**
-- `ctx.broadcast(&event)` - Send to all connected users
-- `ctx.send_to_user(&user, &event)` - Send to specific user
-- `ctx.self_tx()` - Get sender for internal events (use in spawned tasks)
-- `ctx.connected_users()` - Get list of connected user IDs
+**Sink destinations:**
+- `UserDestination::Broadcast` - Send to all connected users
+- `UserDestination::User(user)` - Send to specific user
+- `SelfTarget` - Schedule message to self (for timers, async results)
 
 ### Client Actor
 
-Clients can also use the typed actor pattern:
+Clients also implement the `Actor` trait:
 
 ```rust
-let handle = run_typed_client_actor(
-    conn.into(),
-    my_context,
-    |ctx, event, _spawner| {
-        match event {
-            TypedClientEvent::Connected => { /* all channels established */ }
-            TypedClientEvent::Message(msg) => { /* handle server message */ }
-            TypedClientEvent::Internal(msg) => { /* handle self-sent event */ }
-            TypedClientEvent::Disconnected => { /* connection lost */ }
+struct MyClientActor;
+
+impl ActorProtocol for MyClientActor {
+    type ActorId = ClientSource;
+    type Message = ClientMessage<MyMessage>;
+}
+
+impl<S> Actor<S> for MyClientActor
+where
+    S: Sink<ServerTarget<MyMessage>> + Sink<SelfTarget<MyMessage>>,
+{
+    type Config = MyClientConfig;
+    type State = MyClientState;
+    type Extras = MyClientExtras;
+
+    fn startup(config: Self::Config) -> Self::State {
+        MyClientState { /* initial state */ }
+    }
+
+    fn handle(
+        state: &mut Self::State,
+        extras: &mut Self::Extras,
+        message: AddressedMessage<Self::ActorId, Self::Message>,
+        sink: &mut S,
+    ) {
+        match (&message.from, &message.content) {
+            (ClientSource::Server, ClientMessage::Connected) => {
+                // All channels established
+            }
+            (ClientSource::Server, ClientMessage::Message(msg)) => {
+                // Handle server message
+            }
+            (ClientSource::Server, ClientMessage::Disconnected) => {
+                // Connection lost
+            }
+            (ClientSource::Internal, ClientMessage::Message(msg)) => {
+                // Self-scheduled message
+            }
+            _ => {}
         }
-    },
+    }
+
+    fn shutdown(state: &mut Self::State, extras: &mut Self::Extras) {}
+}
+```
+
+Start the actor:
+
+```rust
+let handle = with_client_actor::<MyClientActor, MyMessage, MyContext, TokioSpawner>(
+    conn,
+    my_context,
     TokioSpawner,  // or WasmSpawner for WASM
 );
 
-// Send events via the handle:
-handle.sender.send(my_event)?;
+// Send messages via handle:
+handle.sender.send(my_message)?;
 ```
 
-**Client context methods:**
-- `ctx.send(&event)` - Send event to server (routed by type)
-- `ctx.self_tx().send(event)` - Send event to self (for timers, async operations)
-- `ctx.game_context()` - Access your custom context
+**Sink destinations:**
+- `ServerTarget` - Send to server
+- `SelfTarget` - Schedule message to self
 
 ### Connection Flow
 

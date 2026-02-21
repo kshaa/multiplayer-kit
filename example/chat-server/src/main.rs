@@ -2,52 +2,47 @@
 //!
 //! Run with: cargo run --bin chat-server
 
-use chat_protocol::{ChatChannel, ChatEvent, ChatMessage, ChatProtocol, ChatRoomConfig, ChatUser};
-use multiplayer_kit_helpers::{TypedContext, TypedEvent, with_typed_actor};
+use chat_server::{ChatActor, ChatRoomExtras};
+use chat_protocol::{ChatEvent, ChatRoomConfig, ChatUser};
+use multiplayer_kit_helpers::with_server_actor;
 use multiplayer_kit_protocol::RejectReason;
 use multiplayer_kit_server::{AuthRequest, GameServerContext, Server};
 use serde::Deserialize;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 static NEXT_USER_ID: AtomicU64 = AtomicU64::new(1);
 
 // ============================================================================
-// Game Context - demonstrates how games can inject their own services
+// Game Context
 // ============================================================================
 
 /// Example game context for the chat server.
-///
-/// In a real game, this might contain:
-/// - Database connection pools
-/// - History/replay managers
-/// - Metrics recorders
-/// - External service clients
 struct ChatServerContext {
-    /// Server name for welcome messages
     server_name: String,
-    /// Total messages counter (just for demo)
-    message_count: AtomicU64,
 }
 
-impl GameServerContext for ChatServerContext {}
+impl GameServerContext for ChatServerContext {
+    type RoomExtras = ChatRoomExtras;
+
+    fn get_room_extras(&self, _room_id: multiplayer_kit_protocol::RoomId) -> Self::RoomExtras {
+        ChatRoomExtras {
+            server_name: self.server_name.clone(),
+        }
+    }
+}
 
 impl ChatServerContext {
     fn new(server_name: impl Into<String>) -> Self {
         Self {
             server_name: server_name.into(),
-            message_count: AtomicU64::new(0),
         }
     }
-
-    fn increment_message_count(&self) -> u64 {
-        self.message_count.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn server_name(&self) -> &str {
-        &self.server_name
-    }
 }
+
+// ============================================================================
+// Main
+// ============================================================================
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -67,23 +62,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  GET  /cert-hash      - Get cert hash for WebTransport");
     println!();
 
-    // Create the game context with any services your game needs
     let game_context = ChatServerContext::new("Multiplayer-Kit Chat Demo");
 
     let server = Server::<ChatUser, ChatRoomConfig, ChatServerContext>::builder()
         .http_addr("127.0.0.1:8080")
         .quic_addr("127.0.0.1:8080")
         .jwt_secret(b"super-secret-key-for-dev-only")
-        // Allow dev server origins (npx serve uses port 3000)
         .cors_origins(vec![
             "http://localhost:3000".to_string(),
             "http://127.0.0.1:3000".to_string(),
             "http://localhost:8080".to_string(),
             "http://127.0.0.1:8080".to_string(),
         ])
-        // Set the game context - available in auth and room handlers
         .context(game_context)
-        // Auth handler now receives the game context
         .auth_handler(|req: AuthRequest, ctx: Arc<ChatServerContext>| async move {
             let body = req
                 .body
@@ -114,114 +105,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             tracing::info!(
                 "[{}] Issued ticket for user: {} (id={})",
-                ctx.server_name(),
+                ctx.server_name,
                 user.username,
                 user.id
             );
             Ok(user)
         })
-        // Typed actor - handles events with automatic framing and serialization
-        .room_handler(with_typed_actor::<
+        .room_handler(with_server_actor::<
+            ChatActor,
             ChatUser,
-            ChatProtocol,
+            ChatEvent,
             ChatRoomConfig,
             ChatServerContext,
-            _,
-        >(chat_actor))
+        >())
         .build()
         .expect("Failed to build server");
 
     server.run().await?;
 
     Ok(())
-}
-
-/// Chat room actor - receives typed events, one at a time.
-///
-/// **Synchronous and non-blocking.** Access game context via `ctx.game_context()`.
-fn chat_actor(
-    ctx: TypedContext<ChatUser, ChatProtocol, ChatServerContext>,
-    event: TypedEvent<ChatUser, ChatProtocol>,
-    config: Arc<ChatRoomConfig>,
-) {
-    let room_id = ctx.room_id();
-    let game_ctx = ctx.game_context();
-
-    match event {
-        TypedEvent::UserConnected(user) => {
-            tracing::info!(
-                "[{}] [Room {:?} '{}'] {} connected",
-                game_ctx.server_name(),
-                room_id,
-                config.name,
-                user.username
-            );
-
-            // Broadcast join message
-            let msg = ChatEvent::Chat(ChatMessage::System(format!(
-                "*** {} joined '{}' ***",
-                user.username, config.name
-            )));
-            ctx.broadcast(&msg);
-        }
-
-        TypedEvent::UserDisconnected(user) => {
-            tracing::info!(
-                "[{}] [Room {:?} '{}'] {} disconnected",
-                game_ctx.server_name(),
-                room_id,
-                config.name,
-                user.username
-            );
-
-            // Broadcast leave message
-            let msg = ChatEvent::Chat(ChatMessage::System(format!(
-                "*** {} left the chat ***",
-                user.username
-            )));
-            ctx.broadcast(&msg);
-        }
-
-        TypedEvent::Message {
-            sender,
-            channel: ChatChannel::Chat,
-            event: ChatEvent::Chat(ChatMessage::SendText { content }),
-            ..
-        } => {
-            // Client sent a text message - add their username and broadcast
-            let count = game_ctx.increment_message_count();
-            tracing::info!(
-                "[{}] [Room {:?}] Message #{}: {}: {}",
-                game_ctx.server_name(),
-                room_id,
-                count + 1,
-                sender.username,
-                content
-            );
-
-            // Broadcast as TextSent with the sender's username
-            let msg = ChatEvent::Chat(ChatMessage::TextSent {
-                username: sender.username,
-                content,
-            });
-            ctx.broadcast(&msg);
-        }
-
-        TypedEvent::Message { .. } => {
-            // Ignore other message types (TextSent from clients, etc.)
-        }
-
-        TypedEvent::Internal(_) => {
-            // Handle self-sent events (e.g., timers, scheduled tasks)
-        }
-
-        TypedEvent::Shutdown => {
-            tracing::info!(
-                "[{}] [Room {:?} '{}'] Shutting down",
-                game_ctx.server_name(),
-                room_id,
-                config.name
-            );
-        }
-    }
 }

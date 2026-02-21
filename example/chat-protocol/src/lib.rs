@@ -2,7 +2,7 @@
 //!
 //! Defines channel types, message types, and room config for a simple chat application.
 
-pub use multiplayer_kit_helpers::{DecodeError, EncodeError, TypedProtocol};
+pub use multiplayer_kit_helpers::{ChannelMessage, DecodeError, EncodeError};
 use multiplayer_kit_protocol::RoomConfig;
 use serde::{Deserialize, Serialize};
 
@@ -92,7 +92,7 @@ pub enum ChatMessage {
 }
 
 // ============================================================================
-// Unified Event Enum
+// Unified Event Enum (implements ChannelMessage)
 // ============================================================================
 
 /// All events that can occur (wraps per-channel message types).
@@ -102,16 +102,18 @@ pub enum ChatEvent {
     Chat(ChatMessage),
 }
 
-// ============================================================================
-// Protocol Implementation
-// ============================================================================
-
-/// Chat protocol definition.
-pub struct ChatProtocol;
-
-impl TypedProtocol for ChatProtocol {
+impl ChannelMessage for ChatEvent {
     type Channel = ChatChannel;
-    type Event = ChatEvent;
+
+    fn channel(&self) -> Option<ChatChannel> {
+        match self {
+            ChatEvent::Chat(_) => Some(ChatChannel::Chat),
+        }
+    }
+
+    fn all_channels() -> &'static [ChatChannel] {
+        &[ChatChannel::Chat]
+    }
 
     fn channel_to_id(channel: ChatChannel) -> u8 {
         channel as u8
@@ -124,26 +126,20 @@ impl TypedProtocol for ChatProtocol {
         }
     }
 
-    fn all_channels() -> &'static [ChatChannel] {
-        &[ChatChannel::Chat]
+    fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+        match self {
+            ChatEvent::Chat(msg) => {
+                bincode::serialize(msg).map_err(|e| EncodeError::Serialize(e.to_string()))
+            }
+        }
     }
 
-    fn decode(channel: ChatChannel, data: &[u8]) -> Result<ChatEvent, DecodeError> {
+    fn decode(channel: ChatChannel, data: &[u8]) -> Result<Self, DecodeError> {
         match channel {
             ChatChannel::Chat => {
                 let msg: ChatMessage = bincode::deserialize(data)
                     .map_err(|e| DecodeError::Deserialize(e.to_string()))?;
                 Ok(ChatEvent::Chat(msg))
-            }
-        }
-    }
-
-    fn encode(event: &ChatEvent) -> Result<(ChatChannel, Vec<u8>), EncodeError> {
-        match event {
-            ChatEvent::Chat(msg) => {
-                let data =
-                    bincode::serialize(msg).map_err(|e| EncodeError::Serialize(e.to_string()))?;
-                Ok((ChatChannel::Chat, data))
             }
         }
     }

@@ -1,27 +1,27 @@
-//! Channel handling for server-side typed actors.
+//! Channel handling for server-side actors.
 
-use super::ServerInternalEvent;
-use crate::utils::{MessageBuffer, TypedProtocol};
+use super::InternalServerEvent;
+use crate::utils::{ChannelMessage, MessageBuffer};
 use dashmap::DashMap;
 use multiplayer_kit_protocol::{ChannelId, UserContext};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Handle a single channel for the typed server actor.
+/// Handle a single channel for the server actor.
 ///
 /// This function:
 /// 1. Reads the channel type identification message
 /// 2. Tracks the channel for user connection status
 /// 3. Reads and decodes messages, forwarding to the actor
 /// 4. Cleans up on disconnect
-pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
+pub(super) async fn handle_server_channel<T: UserContext, M: ChannelMessage>(
     mut channel: multiplayer_kit_server::ServerChannel,
     user: T,
     channel_id: ChannelId,
-    event_tx: mpsc::Sender<ServerInternalEvent<T, P>>,
-    user_channels: Arc<DashMap<ChannelId, (T, P::Channel)>>,
-    pending_users: Arc<DashMap<T::Id, (T, HashMap<P::Channel, ChannelId>)>>,
+    event_tx: mpsc::Sender<InternalServerEvent<T, M>>,
+    user_channels: Arc<DashMap<ChannelId, (T, M::Channel)>>,
+    pending_users: Arc<DashMap<T::Id, (T, HashMap<M::Channel, ChannelId>)>>,
     connected_users: Arc<DashMap<T::Id, T>>,
     expected_channels: usize,
 ) {
@@ -29,8 +29,7 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
     tracing::debug!("Channel {:?} opened for user {:?}", channel_id, user_id);
     let mut buffer = MessageBuffer::new();
 
-    // First message identifies channel type
-    let channel_type: P::Channel;
+    let channel_type: M::Channel;
     'outer: loop {
         let Some(data) = channel.read().await else {
             return;
@@ -39,7 +38,7 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
         for result in buffer.push(&data) {
             match result {
                 Ok(msg) if msg.len() == 1 => {
-                    if let Some(ct) = P::channel_from_id(msg[0]) {
+                    if let Some(ct) = M::channel_from_id(msg[0]) {
                         channel_type = ct;
                         tracing::info!(
                             "Channel {:?} identified as {:?} for {}",
@@ -64,10 +63,8 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
         }
     }
 
-    // Register channel
     user_channels.insert(channel_id, (user.clone(), channel_type));
 
-    // Track for user connection status
     let user_ready = {
         let mut entry = pending_users
             .entry(user_id.clone())
@@ -75,7 +72,7 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
         entry.1.insert(channel_type, channel_id);
 
         if entry.1.len() >= expected_channels {
-            drop(entry); // Release DashMap ref before remove
+            drop(entry);
             let (_, (user, _)) = pending_users.remove(&user_id).unwrap();
             connected_users.insert(user_id.clone(), user.clone());
             Some(user)
@@ -91,11 +88,10 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
             expected_channels
         );
         let _ = event_tx
-            .send(ServerInternalEvent::UserReady(user.clone()))
+            .send(InternalServerEvent::UserReady(user.clone()))
             .await;
     }
 
-    // Read messages
     loop {
         let Some(data) = channel.read().await else {
             break;
@@ -103,13 +99,13 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
 
         for result in buffer.push(&data) {
             match result {
-                Ok(msg) => match P::decode(channel_type, &msg) {
-                    Ok(event) => {
+                Ok(msg) => match M::decode(channel_type, &msg) {
+                    Ok(message) => {
                         let _ = event_tx
-                            .send(ServerInternalEvent::Message {
+                            .send(InternalServerEvent::Message {
                                 sender: user.clone(),
-                                channel_type,
-                                event,
+                                channel: channel_type,
+                                message,
                             })
                             .await;
                     }
@@ -125,12 +121,9 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
         }
     }
 
-    // Channel closed - remove from tracking
     user_channels.remove(&channel_id);
 
-    // Check if user is now disconnected
     let user_gone = if connected_users.remove(&user_id).is_some() {
-        // Remove all remaining channels for this user
         let to_remove: Vec<_> = user_channels
             .iter()
             .filter(|r| r.value().0.id() == user_id)
@@ -152,7 +145,7 @@ pub(super) async fn handle_typed_channel<T: UserContext, P: TypedProtocol>(
             channel_type
         );
         let _ = event_tx
-            .send(ServerInternalEvent::UserGone(user.clone()))
+            .send(InternalServerEvent::UserGone(user.clone()))
             .await;
     }
 }

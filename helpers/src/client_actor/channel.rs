@@ -1,12 +1,12 @@
-//! Connection abstraction and channel handling for typed client actor.
+//! Connection abstraction and channel handling for client actor.
 //!
 //! Provides a unified `Connection` type that works on both native and WASM.
 
 use super::{
-    make_shared, ActorHandle, InternalEvent, SharedPtr, TypedActorSender, TypedClientContext,
-    TypedClientEvent,
+    make_shared, ClientActorHandle, ClientActorSender, ClientContext,
+    ClientEvent, InternalEvent, SharedPtr,
 };
-use crate::utils::{frame_message, GameClientContext, MaybeSend, MaybeSync, MessageBuffer, TypedProtocol};
+use crate::utils::{ChannelMessage, frame_message, GameClientContext, MaybeSend, MaybeSync, MessageBuffer};
 use crate::spawning::Spawner;
 use futures::FutureExt;
 use multiplayer_kit_client::{ChannelIO, RoomConnection};
@@ -14,15 +14,11 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use tokio::sync::mpsc;
 
-// ============================================================================
-// Unified Connection type
-// ============================================================================
-
 /// Connection wrapper that works on both native and WASM.
 ///
 /// Uses `Arc<RoomConnection>` on native, `Rc<RoomConnection>` on WASM.
 pub struct Connection {
-    inner: SharedPtr<RoomConnection>,
+    pub(super) inner: SharedPtr<RoomConnection>,
 }
 
 impl From<RoomConnection> for Connection {
@@ -39,10 +35,6 @@ impl From<SharedPtr<RoomConnection>> for Connection {
     }
 }
 
-// ============================================================================
-// Trait for connection types (for external use)
-// ============================================================================
-
 /// Trait for types that can be converted to a Connection.
 ///
 /// Implemented for:
@@ -53,26 +45,17 @@ pub trait ClientConnection: Into<Connection> {}
 impl ClientConnection for RoomConnection {}
 impl ClientConnection for SharedPtr<RoomConnection> {}
 
-// ============================================================================
-// Channel operations using RoomConnectionLike trait
-// ============================================================================
-
 /// Open a channel and spawn the read/write loop.
-///
-/// Uses spawn_local to run the channel in a local context, allowing Rc sharing
-/// and preventing read cancellation issues.
-async fn open_and_run_channel<P: TypedProtocol, S: Spawner>(
+async fn open_and_run_channel<M: ChannelMessage, S: Spawner>(
     conn: &Connection,
     spawner: S,
-    channel_type: P::Channel,
-    event_tx: mpsc::UnboundedSender<InternalEvent<P>>,
+    channel_type: M::Channel,
+    event_tx: mpsc::UnboundedSender<InternalEvent<M>>,
     write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> Result<(), String> {
-    // Use RoomConnectionLike trait - works because SharedPtr<T> derefs to T
     let channel = conn.inner.open_channel().await.map_err(|e| e.to_string())?;
-    let channel_id_byte = P::channel_to_id(channel_type);
-    // Use spawn_local so channel can use Rc and nested spawn_local
-    spawner.spawn_local(run_channel::<P, _, S>(
+    let channel_id_byte = M::channel_to_id(channel_type);
+    spawner.spawn_local(run_channel::<M, _, S>(
         channel,
         channel_type,
         channel_id_byte,
@@ -83,38 +66,27 @@ async fn open_and_run_channel<P: TypedProtocol, S: Spawner>(
     Ok(())
 }
 
-// ============================================================================
-// Channel runner
-// ============================================================================
-
 /// Run a single channel's read/write loop.
-///
-/// Spawns a dedicated read task to avoid cancelling reads (which loses data on WASM).
-/// Uses Rc for channel sharing since this runs in a single-threaded local context.
-async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static, S: Spawner>(
+pub(super) async fn run_channel<M: ChannelMessage, C: ChannelIO + 'static, S: Spawner>(
     channel: C,
-    channel_type: P::Channel,
+    channel_type: M::Channel,
     channel_id_byte: u8,
-    event_tx: mpsc::UnboundedSender<InternalEvent<P>>,
+    event_tx: mpsc::UnboundedSender<InternalEvent<M>>,
     mut write_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     spawner: S,
 ) {
     tracing::info!("[Channel {}] run_channel started", channel_id_byte);
-    // Send channel ID to identify this channel to the server
     let id_msg = frame_message(&[channel_id_byte]);
     if channel.write(&id_msg).await.is_err() {
         let _ = event_tx.send(InternalEvent::Disconnected);
         return;
     }
 
-    // Wrap channel in Rc for sharing (safe because we're in a local/single-threaded context)
     let channel = std::rc::Rc::new(channel);
     let mut buffer = MessageBuffer::new();
 
-    // Channel for read results - reads are NEVER cancelled
     let (read_tx, mut read_rx) = mpsc::unbounded_channel::<Result<Vec<u8>, ()>>();
 
-    // Spawn dedicated read task - runs in the same local context
     {
         let channel = channel.clone();
         let channel_id = channel_id_byte;
@@ -147,7 +119,6 @@ async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static, S: Spawner>(
         });
     }
 
-    // Main loop - select between read results and write requests
     loop {
         let read_fut = read_rx.recv().fuse();
         let write_fut = write_rx.recv().fuse();
@@ -159,10 +130,10 @@ async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static, S: Spawner>(
                     Some(Ok(data)) => {
                         for result in buffer.push(&data) {
                             match result {
-                                Ok(msg) => match P::decode(channel_type, &msg) {
-                                    Ok(event) => {
+                                Ok(msg) => match M::decode(channel_type, &msg) {
+                                    Ok(message) => {
                                         tracing::trace!("[Channel {}] Decoded message, forwarding to actor", channel_id_byte);
-                                        let _ = event_tx.send(InternalEvent::Message(event));
+                                        let _ = event_tx.send(InternalEvent::Message(message));
                                     }
                                     Err(e) => {
                                         tracing::warn!("[Channel {}] Failed to decode message: {:?}", channel_id_byte, e);
@@ -196,39 +167,27 @@ async fn run_channel<P: TypedProtocol, C: ChannelIO + 'static, S: Spawner>(
     }
 }
 
-// ============================================================================
-// Actor implementation
-// ============================================================================
-
-/// Implementation of run_typed_client_actor.
-///
-/// This is a SYNC function that:
-/// 1. Creates channels for communication
-/// 2. Spawns the async event loop using the provided spawner
-/// 3. Returns ActorHandle immediately
-pub(super) fn run_typed_client_actor_impl<P, Ctx, F, S>(
+/// Implementation of run_client_actor.
+pub(super) fn run_client_actor_impl<M, Ctx, F, S>(
     conn: Connection,
     game_context: Ctx,
     actor_fn: F,
     spawner: S,
-) -> ActorHandle<P>
+) -> ClientActorHandle<M>
 where
-    P: TypedProtocol,
+    M: ChannelMessage,
     Ctx: GameClientContext,
-    F: Fn(&TypedClientContext<P, Ctx>, TypedClientEvent<P>, &S) + MaybeSend + MaybeSync + Clone + 'static,
+    F: Fn(&ClientContext<M, Ctx>, ClientEvent<M>, &S) + MaybeSend + MaybeSync + Clone + 'static,
     S: Spawner,
 {
-    let (user_event_tx, user_event_rx) = mpsc::unbounded_channel::<P::Event>();
+    let (user_msg_tx, user_msg_rx) = mpsc::unbounded_channel::<M>();
 
-    let typed_sender = TypedActorSender::new(user_event_tx);
-    let handle = ActorHandle {
-        sender: typed_sender,
-    };
+    let sender = ClientActorSender::new(user_msg_tx);
+    let handle = ClientActorHandle { sender };
 
     let spawner_clone = spawner.clone();
-    // Use spawn_with_local_context so channels can use spawn_local internally
     spawner.spawn_with_local_context(async move {
-        run_actor_loop::<P, Ctx, F, S>(conn, game_context, actor_fn, spawner_clone, user_event_rx)
+        run_actor_loop::<M, Ctx, F, S>(conn, game_context, actor_fn, spawner_clone, user_msg_rx)
             .await;
     });
 
@@ -236,33 +195,32 @@ where
 }
 
 /// The async actor event loop.
-async fn run_actor_loop<P, Ctx, F, S>(
+async fn run_actor_loop<M, Ctx, F, S>(
     conn: Connection,
     game_context: Ctx,
     actor_fn: F,
     spawner: S,
-    mut user_event_rx: mpsc::UnboundedReceiver<P::Event>,
+    mut user_msg_rx: mpsc::UnboundedReceiver<M>,
 ) where
-    P: TypedProtocol,
+    M: ChannelMessage,
     Ctx: GameClientContext,
-    F: Fn(&TypedClientContext<P, Ctx>, TypedClientEvent<P>, &S) + MaybeSend + MaybeSync + Clone + 'static,
+    F: Fn(&ClientContext<M, Ctx>, ClientEvent<M>, &S) + MaybeSend + MaybeSync + Clone + 'static,
     S: Spawner,
 {
     let game_context = make_shared(game_context);
-    let channels_to_open = P::all_channels();
-    let mut channel_senders: HashMap<P::Channel, mpsc::UnboundedSender<Vec<u8>>> = HashMap::new();
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<InternalEvent<P>>();
-    let (self_tx, mut self_rx) = mpsc::unbounded_channel::<P::Event>();
+    let channels_to_open = M::all_channels();
+    let mut channel_senders: HashMap<M::Channel, mpsc::UnboundedSender<Vec<u8>>> = HashMap::new();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<InternalEvent<M>>();
+    let (self_tx, mut self_rx) = mpsc::unbounded_channel::<M>();
 
-    // Open all channels
     for &channel_type in channels_to_open {
-        let channel_id = P::channel_to_id(channel_type);
-        tracing::info!("[Typed] Opening channel {} (id={})", std::any::type_name::<P::Channel>(), channel_id);
+        let channel_id = M::channel_to_id(channel_type);
+        tracing::info!("[Client] Opening channel {} (id={})", std::any::type_name::<M::Channel>(), channel_id);
         
         let (write_tx, write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         channel_senders.insert(channel_type, write_tx);
 
-        let result = open_and_run_channel::<P, _>(
+        let result = open_and_run_channel::<M, _>(
             &conn,
             spawner.clone(),
             channel_type,
@@ -271,52 +229,48 @@ async fn run_actor_loop<P, Ctx, F, S>(
         )
         .await;
         
-        tracing::info!("[Typed] Channel {} opened, result={}", channel_id, result.is_ok());
+        tracing::info!("[Client] Channel {} opened, result={}", channel_id, result.is_ok());
 
         if let Err(e) = result {
             tracing::error!("Failed to open channel: {}", e);
-            let ctx = TypedClientContext {
+            let ctx = ClientContext {
                 channels: HashMap::new(),
                 self_tx: self_tx.clone(),
                 game_context: game_context.clone(),
                 _phantom: PhantomData,
             };
-            actor_fn(&ctx, TypedClientEvent::Disconnected, &spawner);
+            actor_fn(&ctx, ClientEvent::Disconnected, &spawner);
             return;
         }
     }
 
-    // Yield to let spawned read tasks start before we emit Connected
-    // This ensures they're ready to receive messages from the server
     #[cfg(not(target_arch = "wasm32"))]
     {
-        tracing::info!("[Typed] All channels opened, yielding to let read tasks start");
+        tracing::info!("[Client] All channels opened, yielding to let read tasks start");
         tokio::task::yield_now().await;
-        tracing::info!("[Typed] Yield complete, emitting Connected");
+        tracing::info!("[Client] Yield complete, emitting Connected");
     }
 
-    let ctx = TypedClientContext {
+    let ctx = ClientContext {
         channels: channel_senders,
         self_tx,
         game_context,
         _phantom: PhantomData,
     };
 
-    actor_fn(&ctx, TypedClientEvent::Connected, &spawner);
+    actor_fn(&ctx, ClientEvent::Connected, &spawner);
 
-    // Spawn message forwarder
     {
         let ctx = ctx.clone();
         spawner.spawn(async move {
-            while let Some(event) = user_event_rx.recv().await {
-                if ctx.send(&event).is_err() {
+            while let Some(message) = user_msg_rx.recv().await {
+                if ctx.send(&message).is_err() {
                     break;
                 }
             }
         });
     }
 
-    // Core event loop
     loop {
         let event_fut = event_rx.recv().fuse();
         let self_fut = self_rx.recv().fuse();
@@ -325,17 +279,17 @@ async fn run_actor_loop<P, Ctx, F, S>(
         match futures::future::select(event_fut, self_fut).await {
             futures::future::Either::Left((event, _)) => match event {
                 Some(InternalEvent::Message(msg)) => {
-                    actor_fn(&ctx, TypedClientEvent::Message(msg), &spawner);
+                    actor_fn(&ctx, ClientEvent::Message(msg), &spawner);
                 }
                 Some(InternalEvent::Disconnected) => {
-                    actor_fn(&ctx, TypedClientEvent::Disconnected, &spawner);
+                    actor_fn(&ctx, ClientEvent::Disconnected, &spawner);
                     break;
                 }
                 None => break,
             },
-            futures::future::Either::Right((self_event, _)) => {
-                if let Some(event) = self_event {
-                    actor_fn(&ctx, TypedClientEvent::Internal(event), &spawner);
+            futures::future::Either::Right((self_msg, _)) => {
+                if let Some(message) = self_msg {
+                    actor_fn(&ctx, ClientEvent::Internal(message), &spawner);
                 }
             }
         }

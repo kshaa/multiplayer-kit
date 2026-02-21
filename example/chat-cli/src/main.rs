@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --bin chat-cli
 
-use chat_client::{ApiClient, ChatClientAdapter, ChatHandle, ConnectionConfig, GameClientContext, RoomConnection, RoomId, start_chat_actor};
+use chat_client::{ApiClient, ChatClientAdapter, ChatHandle, ConnectionConfig, RoomConnection, RoomId, start_chat_actor};
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
 use tokio::sync::mpsc;
@@ -24,12 +24,10 @@ enum UiEvent {
 }
 
 /// CLI adapter - sends events to the UI channel.
+#[derive(Clone)]
 struct CliAdapter {
     ui_tx: mpsc::Sender<UiEvent>,
 }
-
-// Required because ChatClientAdapter extends GameClientContext
-impl GameClientContext for CliAdapter {}
 
 impl ChatClientAdapter for CliAdapter {
     fn on_connected(&self) {

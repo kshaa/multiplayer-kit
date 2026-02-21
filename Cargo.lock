@@ -526,6 +526,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chat-tests"
+version = "0.1.0"
+dependencies = [
+ "chat-client",
+ "chat-protocol",
+ "chat-server",
+ "multiplayer-kit-helpers",
+ "multiplayer-kit-protocol",
+ "tokio",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1294,6 +1306,7 @@ dependencies = [
  "multiplayer-kit-client",
  "multiplayer-kit-protocol",
  "multiplayer-kit-server",
+ "serde",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

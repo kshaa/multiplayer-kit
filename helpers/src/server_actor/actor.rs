@@ -1,110 +1,105 @@
 //! Server actor wrapper and main loop.
 
-use super::{ServerInternalEvent, TypedContext, TypedEvent};
-use crate::utils::TypedProtocol;
+use super::sink::{ServerOutput, ServerSink};
+use super::types::{ServerActorConfig, ServerMessage, ServerSource};
+use super::InternalServerEvent;
+use crate::actor::{Actor, ActorProtocol, AddressedMessage};
+use crate::utils::ChannelMessage;
 use dashmap::DashMap;
-use multiplayer_kit_protocol::UserContext;
+use multiplayer_kit_protocol::{RoomConfig, UserContext};
 use multiplayer_kit_server::GameServerContext;
 use std::collections::HashMap;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Wrap a typed actor function for the server.
+/// Wrap an Actor implementation for use as a server room handler.
 ///
-/// The actor function receives:
-/// - `TypedContext<T, P, Ctx>` for sending messages and accessing game context
-/// - `TypedEvent<T, P>` the current event
-/// - `Arc<C>` the room config (shared, immutable)
+/// The actor receives `AddressedMessage<ServerSource<T>, ServerMessage<M>>` where:
+/// - `ServerSource::User(user)` for messages from users
+/// - `ServerSource::Internal` for self-scheduled messages
+/// - `ServerMessage::UserConnected` / `UserDisconnected` / `Message(M)`
 ///
-/// **The actor function must be synchronous and never block.**
-/// Use `tokio::spawn` for any async work, and `ctx.self_tx()` to send results back.
-///
-/// # Example
-///
-/// ```ignore
-/// .room_handler(with_typed_actor::<
-///     MyUser,
-///     MyProtocol,
-///     MyRoomConfig,
-///     MyGameContext,
-///     _,
-/// >(my_actor))
-///
-/// fn my_actor(
-///     ctx: TypedContext<MyUser, MyProtocol, MyGameContext>,
-///     event: TypedEvent<MyUser, MyProtocol>,
-///     config: Arc<MyRoomConfig>,
-/// ) {
-///     // Handle event synchronously, spawn tasks for async work
-/// }
-/// ```
-pub fn with_typed_actor<T, P, C, Ctx, F>(
-    actor_fn: F,
-) -> impl Fn(
+/// Outputs via the sink are routed:
+/// - `Sink<UserTarget<T, M>>` with `UserDestination::User(u)` -> send to specific user
+/// - `Sink<UserTarget<T, M>>` with `UserDestination::Broadcast` -> broadcast to all
+/// - `Sink<SelfTarget<M>>` -> schedule message back to self
+pub fn with_server_actor<A, T, M, C, Ctx>()
+-> impl Fn(
     multiplayer_kit_server::Room<T>,
     C,
     Arc<Ctx>,
 ) -> Pin<Box<dyn Future<Output = ()> + Send>>
-       + Send
-       + Sync
-       + Clone
-       + 'static
+   + Send
+   + Sync
+   + Clone
+   + 'static
 where
     T: UserContext,
-    P: TypedProtocol,
-    C: multiplayer_kit_protocol::RoomConfig + 'static,
+    M: ChannelMessage,
+    C: RoomConfig + 'static,
     Ctx: GameServerContext,
-    F: Fn(TypedContext<T, P, Ctx>, TypedEvent<T, P>, Arc<C>) + Send + Sync + Clone + 'static,
+    A: Actor<ServerSink<T, M>>
+        + ActorProtocol<ActorId = ServerSource<T>, Message = ServerMessage<M>>
+        + 'static,
+    A::Config: From<ServerActorConfig<C>>,
+    A::State: Send + 'static,
+    A::Extras: From<Ctx::RoomExtras> + Send + 'static,
 {
-    let actor_fn = Arc::new(actor_fn);
     move |room: multiplayer_kit_server::Room<T>, config: C, ctx: Arc<Ctx>| {
-        let actor_fn = Arc::clone(&actor_fn);
         Box::pin(async move {
-            run_typed_server_actor::<T, P, C, Ctx, F>(room, config, ctx, actor_fn).await;
+            run_server_actor::<A, T, M, C, Ctx>(room, config, ctx).await;
         })
     }
 }
 
-/// Internal: run the typed server actor loop.
-async fn run_typed_server_actor<T, P, C, Ctx, F>(
+async fn run_server_actor<A, T, M, C, Ctx>(
     mut room: multiplayer_kit_server::Room<T>,
     config: C,
     game_context: Arc<Ctx>,
-    actor_fn: Arc<F>,
 ) where
     T: UserContext,
-    P: TypedProtocol,
-    C: multiplayer_kit_protocol::RoomConfig + 'static,
+    M: ChannelMessage,
+    C: RoomConfig + 'static,
     Ctx: GameServerContext,
-    F: Fn(TypedContext<T, P, Ctx>, TypedEvent<T, P>, Arc<C>) + Send + Sync + 'static,
+    A: Actor<ServerSink<T, M>>
+        + ActorProtocol<ActorId = ServerSource<T>, Message = ServerMessage<M>>
+        + 'static,
+    A::Config: From<ServerActorConfig<C>>,
+    A::State: Send + 'static,
+    A::Extras: From<Ctx::RoomExtras> + Send + 'static,
 {
-    let config = Arc::new(config);
     use multiplayer_kit_server::Accept;
 
-    let (event_tx, mut event_rx) = mpsc::channel::<ServerInternalEvent<T, P>>(256);
-    let (self_tx, mut self_rx) = mpsc::channel::<P::Event>(64);
+    let room_id = room.room_id();
 
-    let user_channels: Arc<DashMap<multiplayer_kit_protocol::ChannelId, (T, P::Channel)>> =
+    // Create actor config and state
+    let actor_config = ServerActorConfig {
+        room_id,
+        room_config: config,
+    };
+    let mut state = A::startup(actor_config.into());
+    let mut extras: A::Extras = game_context.get_room_extras(room_id).into();
+
+    let (event_tx, mut event_rx) = mpsc::channel::<InternalServerEvent<T, M>>(256);
+    let (self_tx, mut self_rx) = mpsc::channel::<M>(64);
+
+    let user_channels: Arc<DashMap<multiplayer_kit_protocol::ChannelId, (T, M::Channel)>> =
         Arc::new(DashMap::new());
 
-    let pending_users: Arc<DashMap<T::Id, (T, HashMap<P::Channel, multiplayer_kit_protocol::ChannelId>)>> =
+    let pending_users: Arc<DashMap<T::Id, (T, HashMap<M::Channel, multiplayer_kit_protocol::ChannelId>)>> =
         Arc::new(DashMap::new());
 
     let connected_users: Arc<DashMap<T::Id, T>> = Arc::new(DashMap::new());
 
-    let ctx = TypedContext {
-        room_id: room.room_id(),
-        self_tx,
-        handle: room.handle(),
-        user_channels: user_channels.clone(),
-        game_context,
-        _phantom: PhantomData,
-    };
+    // We need to keep track of self_tx for routing internal messages
+    let self_tx_for_routing = self_tx.clone();
 
-    let expected_channels = P::all_channels().len();
+    let handle = room.handle();
+    let expected_channels = M::all_channels().len();
+
+    let mut sink = ServerSink::<T, M>::new();
 
     loop {
         tokio::select! {
@@ -118,14 +113,14 @@ async fn run_typed_server_actor<T, P, C, Ctx, F>(
                         let cu = Arc::clone(&connected_users);
 
                         tokio::spawn(async move {
-                            super::channel::handle_typed_channel::<T, P>(
+                            super::channel::handle_server_channel::<T, M>(
                                 channel, user, channel_id, tx, uc, pu, cu, expected_channels,
                             )
                             .await;
                         });
                     }
                     Some(Accept::Closing) => {
-                        actor_fn(ctx.clone(), TypedEvent::Shutdown, Arc::clone(&config));
+                        A::shutdown(&mut state, &mut extras);
                         break;
                     }
                     None => break,
@@ -133,30 +128,89 @@ async fn run_typed_server_actor<T, P, C, Ctx, F>(
             }
             event = event_rx.recv() => {
                 match event {
-                    Some(ServerInternalEvent::UserReady(user)) => {
-                        actor_fn(ctx.clone(), TypedEvent::UserConnected(user), Arc::clone(&config));
+                    Some(InternalServerEvent::UserReady(user)) => {
+                        let msg = AddressedMessage {
+                            from: ServerSource::User(user),
+                            content: ServerMessage::UserConnected,
+                        };
+                        A::handle(&mut state, &mut extras, msg, &mut sink);
+                        route_outputs::<T, M>(&mut sink, &handle, &user_channels, &self_tx_for_routing);
                     }
-                    Some(ServerInternalEvent::UserGone(user)) => {
-                        actor_fn(ctx.clone(), TypedEvent::UserDisconnected(user), Arc::clone(&config));
+                    Some(InternalServerEvent::UserGone(user)) => {
+                        let msg = AddressedMessage {
+                            from: ServerSource::User(user),
+                            content: ServerMessage::UserDisconnected,
+                        };
+                        A::handle(&mut state, &mut extras, msg, &mut sink);
+                        route_outputs::<T, M>(&mut sink, &handle, &user_channels, &self_tx_for_routing);
                     }
-                    Some(ServerInternalEvent::Message { sender, channel_type, event }) => {
-                        actor_fn(
-                            ctx.clone(),
-                            TypedEvent::Message {
-                                sender,
-                                channel: channel_type,
-                                event,
-                            },
-                            Arc::clone(&config),
-                        );
+                    Some(InternalServerEvent::Message { sender, channel: _, message }) => {
+                        let msg = AddressedMessage {
+                            from: ServerSource::User(sender),
+                            content: ServerMessage::Message(message),
+                        };
+                        A::handle(&mut state, &mut extras, msg, &mut sink);
+                        route_outputs::<T, M>(&mut sink, &handle, &user_channels, &self_tx_for_routing);
                     }
                     None => break,
                 }
             }
-            self_event = self_rx.recv() => {
-                if let Some(event) = self_event {
-                    actor_fn(ctx.clone(), TypedEvent::Internal(event), Arc::clone(&config));
+            self_msg = self_rx.recv() => {
+                if let Some(message) = self_msg {
+                    let msg = AddressedMessage {
+                        from: ServerSource::Internal,
+                        content: ServerMessage::Message(message),
+                    };
+                    A::handle(&mut state, &mut extras, msg, &mut sink);
+                    route_outputs::<T, M>(&mut sink, &handle, &user_channels, &self_tx_for_routing);
                 }
+            }
+        }
+    }
+}
+
+/// Route outputs from the sink to their destinations.
+fn route_outputs<T, M>(
+    sink: &mut ServerSink<T, M>,
+    handle: &multiplayer_kit_server::RoomHandle<T>,
+    user_channels: &Arc<DashMap<multiplayer_kit_protocol::ChannelId, (T, M::Channel)>>,
+    self_tx: &mpsc::Sender<M>,
+) where
+    T: UserContext,
+    M: ChannelMessage,
+{
+    use crate::utils::frame_message;
+
+    for output in sink.drain() {
+        match output {
+            ServerOutput::ToUser { user, message } => {
+                if let Some(channel_type) = message.channel() {
+                    if let Ok(data) = message.encode() {
+                        let framed = frame_message(&data);
+                        let channel_ids: Vec<_> = user_channels
+                            .iter()
+                            .filter(|r| r.value().1 == channel_type && r.value().0.id() == user.id())
+                            .map(|r| *r.key())
+                            .collect();
+                        handle.send_to(&channel_ids, &framed);
+                    }
+                }
+            }
+            ServerOutput::Broadcast { message } => {
+                if let Some(channel_type) = message.channel() {
+                    if let Ok(data) = message.encode() {
+                        let framed = frame_message(&data);
+                        let channel_ids: Vec<_> = user_channels
+                            .iter()
+                            .filter(|r| r.value().1 == channel_type)
+                            .map(|r| *r.key())
+                            .collect();
+                        handle.send_to(&channel_ids, &framed);
+                    }
+                }
+            }
+            ServerOutput::Internal { message } => {
+                let _ = self_tx.try_send(message);
             }
         }
     }

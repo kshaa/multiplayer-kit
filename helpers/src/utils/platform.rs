@@ -34,8 +34,8 @@ impl<T> MaybeSync for T {}
 
 /// Context trait for game-specific client services.
 ///
-/// Implement this trait on your context type to provide game-specific
-/// services (state managers, caches, etc.) to client actors.
+/// Similar to `GameServerContext`, this provides a way to inject
+/// game-specific extras into client actors.
 ///
 /// On native, requires Send + Sync for thread safety.
 /// On WASM, no Send/Sync required (single-threaded).
@@ -44,19 +44,50 @@ impl<T> MaybeSync for T {}
 ///
 /// ```ignore
 /// struct MyClientContext {
-///     game_state: Arc<RwLock<GameState>>,
 ///     sound_player: SoundPlayer,
 /// }
 ///
-/// impl GameClientContext for MyClientContext {}
+/// struct MyExtras {
+///     sound_player: SoundPlayer,
+/// }
+///
+/// impl GameClientContext for MyClientContext {
+///     type Extras = MyExtras;
+///
+///     fn get_extras(&self) -> Self::Extras {
+///         MyExtras { sound_player: self.sound_player.clone() }
+///     }
+/// }
 /// ```
-pub trait GameClientContext: MaybeSend + MaybeSync + 'static {}
+pub trait GameClientContext: MaybeSend + MaybeSync + 'static {
+    /// Extra tools/services passed to actor's handle and shutdown methods.
+    type Extras: MaybeSend + 'static;
 
-impl GameClientContext for () {}
+    /// Get extras for the actor.
+    fn get_extras(&self) -> Self::Extras;
+}
+
+impl GameClientContext for () {
+    type Extras = ();
+
+    fn get_extras(&self) -> Self::Extras {}
+}
 
 // Blanket impls for shared pointers
 #[cfg(not(target_arch = "wasm32"))]
-impl<T: GameClientContext> GameClientContext for std::sync::Arc<T> {}
+impl<T: GameClientContext> GameClientContext for std::sync::Arc<T> {
+    type Extras = T::Extras;
+
+    fn get_extras(&self) -> Self::Extras {
+        (**self).get_extras()
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
-impl<T: GameClientContext> GameClientContext for std::rc::Rc<T> {}
+impl<T: GameClientContext> GameClientContext for std::rc::Rc<T> {
+    type Extras = T::Extras;
+
+    fn get_extras(&self) -> Self::Extras {
+        (**self).get_extras()
+    }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "chat-tests"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "chat_tests"
+path = "src/lib.rs"
+
+[dependencies]
+chat-protocol = { path = "../chat-protocol" }
+chat-server = { path = "../chat-server" }
+chat-client = { path = "../chat-client" }
+multiplayer-kit-helpers = { path = "../../helpers", default-features = false, features = ["server", "client"] }
+multiplayer-kit-protocol = { path = "../../protocol" }
+
+tokio = { version = "1", features = ["full"] }
