@@ -2,11 +2,10 @@
 
 use super::sink::{ClientOutput, ClientSink};
 use super::types::{ClientMessage, ClientSource};
-use super::{ClientActorHandle, ClientActorSender, InternalEvent};
+use super::{ClientActorHandle, ClientActorSender, InternalEvent, LocalSender};
 use crate::actor::{Actor, ActorProtocol, AddressedMessage};
 use crate::spawning::Spawner;
 use crate::utils::{frame_message, ChannelMessage, GameClientContext, MaybeSend};
-use futures::FutureExt;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
@@ -42,14 +41,16 @@ where
 {
     let conn = conn.into();
     let (user_msg_tx, user_msg_rx) = mpsc::unbounded_channel::<M>();
+    let (local_tx, local_rx) = mpsc::unbounded_channel::<M>();
 
     let sender = ClientActorSender::new(user_msg_tx);
-    let handle = ClientActorHandle { sender };
+    let local_sender = LocalSender::new(local_tx);
+    let handle = ClientActorHandle { sender, local_sender };
 
     let extras = game_context.get_extras();
     let spawner_clone = spawner.clone();
     spawner.spawn_with_local_context(async move {
-        run_actor_loop::<A, M, Ctx, S>(conn, game_context, extras, spawner_clone, user_msg_rx).await;
+        run_actor_loop::<A, M, Ctx, S>(conn, game_context, extras, spawner_clone, user_msg_rx, local_rx).await;
     });
 
     handle
@@ -61,6 +62,7 @@ async fn run_actor_loop<A, M, Ctx, S>(
     extras: Ctx::Extras,
     spawner: S,
     mut user_msg_rx: mpsc::UnboundedReceiver<M>,
+    mut local_rx: mpsc::UnboundedReceiver<M>,
 ) where
     M: ChannelMessage,
     Ctx: GameClientContext,
@@ -150,39 +152,46 @@ async fn run_actor_loop<A, M, Ctx, S>(
 
     // Main event loop
     loop {
-        let event_fut = event_rx.recv().fuse();
-        let self_fut = self_rx.recv().fuse();
-        futures::pin_mut!(event_fut, self_fut);
-
-        match futures::future::select(event_fut, self_fut).await {
-            futures::future::Either::Left((event, _)) => match event {
-                Some(InternalEvent::Message(m)) => {
+        tokio::select! {
+            event = event_rx.recv() => {
+                match event {
+                    Some(InternalEvent::Message(m)) => {
+                        let msg = AddressedMessage {
+                            from: ClientSource::Server,
+                            content: ClientMessage::Message(m),
+                        };
+                        A::handle(&mut state, &mut extras, msg, &mut sink);
+                        route_outputs::<M>(&mut sink, &channel_senders, &self_tx);
+                    }
+                    Some(InternalEvent::Disconnected) => {
+                        let msg = AddressedMessage {
+                            from: ClientSource::Server,
+                            content: ClientMessage::Disconnected,
+                        };
+                        A::handle(&mut state, &mut extras, msg, &mut sink);
+                        A::shutdown(&mut state, &mut extras);
+                        break;
+                    }
+                    None => {
+                        A::shutdown(&mut state, &mut extras);
+                        break;
+                    }
+                }
+            }
+            self_msg = self_rx.recv() => {
+                if let Some(message) = self_msg {
                     let msg = AddressedMessage {
-                        from: ClientSource::Server,
-                        content: ClientMessage::Message(m),
+                        from: ClientSource::Internal,
+                        content: ClientMessage::Message(message),
                     };
                     A::handle(&mut state, &mut extras, msg, &mut sink);
                     route_outputs::<M>(&mut sink, &channel_senders, &self_tx);
                 }
-                Some(InternalEvent::Disconnected) => {
+            }
+            local_msg = local_rx.recv() => {
+                if let Some(message) = local_msg {
                     let msg = AddressedMessage {
-                        from: ClientSource::Server,
-                        content: ClientMessage::Disconnected,
-                    };
-                    A::handle(&mut state, &mut extras, msg, &mut sink);
-                    // Don't route outputs after disconnect
-                    A::shutdown(&mut state, &mut extras);
-                    break;
-                }
-                None => {
-                    A::shutdown(&mut state, &mut extras);
-                    break;
-                }
-            },
-            futures::future::Either::Right((self_msg, _)) => {
-                if let Some(message) = self_msg {
-                    let msg = AddressedMessage {
-                        from: ClientSource::Internal,
+                        from: ClientSource::Local,
                         content: ClientMessage::Message(message),
                     };
                     A::handle(&mut state, &mut extras, msg, &mut sink);

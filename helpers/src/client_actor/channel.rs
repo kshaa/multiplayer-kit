@@ -4,7 +4,7 @@
 
 use super::{
     make_shared, ClientActorHandle, ClientActorSender, ClientContext,
-    ClientEvent, InternalEvent, SharedPtr,
+    ClientEvent, InternalEvent, LocalSender, SharedPtr,
 };
 use crate::utils::{ChannelMessage, frame_message, GameClientContext, MaybeSend, MaybeSync, MessageBuffer};
 use crate::spawning::Spawner;
@@ -181,13 +181,15 @@ where
     S: Spawner,
 {
     let (user_msg_tx, user_msg_rx) = mpsc::unbounded_channel::<M>();
+    let (local_tx, local_rx) = mpsc::unbounded_channel::<M>();
 
     let sender = ClientActorSender::new(user_msg_tx);
-    let handle = ClientActorHandle { sender };
+    let local_sender = LocalSender::new(local_tx);
+    let handle = ClientActorHandle { sender, local_sender };
 
     let spawner_clone = spawner.clone();
     spawner.spawn_with_local_context(async move {
-        run_actor_loop::<M, Ctx, F, S>(conn, game_context, actor_fn, spawner_clone, user_msg_rx)
+        run_actor_loop::<M, Ctx, F, S>(conn, game_context, actor_fn, spawner_clone, user_msg_rx, local_rx)
             .await;
     });
 
@@ -201,6 +203,7 @@ async fn run_actor_loop<M, Ctx, F, S>(
     actor_fn: F,
     spawner: S,
     mut user_msg_rx: mpsc::UnboundedReceiver<M>,
+    mut local_rx: mpsc::UnboundedReceiver<M>,
 ) where
     M: ChannelMessage,
     Ctx: GameClientContext,
@@ -272,24 +275,27 @@ async fn run_actor_loop<M, Ctx, F, S>(
     }
 
     loop {
-        let event_fut = event_rx.recv().fuse();
-        let self_fut = self_rx.recv().fuse();
-        futures::pin_mut!(event_fut, self_fut);
-
-        match futures::future::select(event_fut, self_fut).await {
-            futures::future::Either::Left((event, _)) => match event {
-                Some(InternalEvent::Message(msg)) => {
-                    actor_fn(&ctx, ClientEvent::Message(msg), &spawner);
+        tokio::select! {
+            event = event_rx.recv() => {
+                match event {
+                    Some(InternalEvent::Message(msg)) => {
+                        actor_fn(&ctx, ClientEvent::Message(msg), &spawner);
+                    }
+                    Some(InternalEvent::Disconnected) => {
+                        actor_fn(&ctx, ClientEvent::Disconnected, &spawner);
+                        break;
+                    }
+                    None => break,
                 }
-                Some(InternalEvent::Disconnected) => {
-                    actor_fn(&ctx, ClientEvent::Disconnected, &spawner);
-                    break;
-                }
-                None => break,
-            },
-            futures::future::Either::Right((self_msg, _)) => {
+            }
+            self_msg = self_rx.recv() => {
                 if let Some(message) = self_msg {
                     actor_fn(&ctx, ClientEvent::Internal(message), &spawner);
+                }
+            }
+            local_msg = local_rx.recv() => {
+                if let Some(message) = local_msg {
+                    actor_fn(&ctx, ClientEvent::Local(message), &spawner);
                 }
             }
         }

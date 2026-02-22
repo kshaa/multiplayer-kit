@@ -72,19 +72,64 @@ impl<M: ChannelMessage> ClientActorSender<M> {
     }
 }
 
+/// Sender for local messages directly to the actor (not to server).
+pub struct LocalSender<M: ChannelMessage> {
+    #[cfg(not(target_arch = "wasm32"))]
+    tx: mpsc::UnboundedSender<M>,
+    #[cfg(target_arch = "wasm32")]
+    tx: Rc<mpsc::UnboundedSender<M>>,
+    _marker: PhantomData<M>,
+}
+
+impl<M: ChannelMessage> Clone for LocalSender<M> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<M: ChannelMessage> LocalSender<M> {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new(tx: mpsc::UnboundedSender<M>) -> Self {
+        Self {
+            tx,
+            _marker: PhantomData,
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn new(tx: mpsc::UnboundedSender<M>) -> Self {
+        Self {
+            tx: Rc::new(tx),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Send a local message directly to the actor (bypasses network).
+    pub fn send(&self, message: M) -> Result<(), ActorSendError> {
+        self.tx.send(message).map_err(|_| ActorSendError::ChannelClosed)
+    }
+}
+
 /// Handle to a running client actor.
 ///
-/// Contains the sender for sending messages to the actor.
-/// The actor runs in the background until disconnected.
+/// Contains senders for:
+/// - `sender`: Messages to the server (via network)
+/// - `local_sender`: Local messages directly to the actor (bypasses network)
 pub struct ClientActorHandle<M: ChannelMessage> {
-    /// Sender for sending messages to the actor.
+    /// Sender for sending messages to the server.
     pub sender: ClientActorSender<M>,
+    /// Sender for sending local messages directly to the actor.
+    pub local_sender: LocalSender<M>,
 }
 
 impl<M: ChannelMessage> Clone for ClientActorHandle<M> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            local_sender: self.local_sender.clone(),
         }
     }
 }
@@ -97,6 +142,8 @@ pub enum ClientEvent<M: ChannelMessage> {
     Message(M),
     /// Self-sent message (from ctx.self_tx()).
     Internal(M),
+    /// Local message from the environment (e.g., Bevy sending Tick/KeyEvent).
+    Local(M),
     /// Disconnected (any channel failed).
     Disconnected,
 }

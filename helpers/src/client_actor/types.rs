@@ -31,4 +31,6 @@ pub enum ClientSource {
     Server,
     /// Internal/self-scheduled message.
     Internal,
+    /// Local message from the environment (e.g., Bevy sending Tick/KeyEvent).
+    Local,
 }
