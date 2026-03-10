@@ -2,10 +2,22 @@
 
 mod spawner;
 
+#[cfg(feature = "client")]
+mod tokio;
+
+#[cfg(feature = "client")]
+mod local_set;
+
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+mod wasm;
+
 pub use spawner::Spawner;
 
 #[cfg(feature = "client")]
-pub use spawner::TokioSpawner;
+pub use self::tokio::TokioSpawner;
+
+#[cfg(feature = "client")]
+pub use local_set::LocalSetSpawner;
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-pub use spawner::WasmSpawner;
+pub use wasm::WasmSpawner;

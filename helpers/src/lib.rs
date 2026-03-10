@@ -45,16 +45,16 @@ pub use server_actor::{
 
 #[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
 pub use client_actor::{
-    ClientActorHandle, ActorSendError, ClientConnection, SharedPtr, ClientActorSender,
-    ClientContext, ClientEvent, run_client_actor, with_client_actor,
+    ClientActorHandle, ActorSendError, ClientConnection, Connection, SharedPtr, ClientActorSender,
     ClientMessage, ClientSource, ClientSink, ClientOutput, ServerTarget, LocalSender,
+    NetworkBridge, BridgeEvent, with_client_actor,
 };
 
 #[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
 pub use spawning::Spawner;
 
 #[cfg(feature = "client")]
-pub use spawning::TokioSpawner;
+pub use spawning::{TokioSpawner, LocalSetSpawner};
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub use spawning::WasmSpawner;

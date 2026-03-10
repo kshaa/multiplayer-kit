@@ -1,6 +1,4 @@
-//! Task spawner abstraction for cross-platform async code.
-//!
-//! Provides the `Spawner` trait and built-in implementations for tokio and WASM.
+//! Spawner trait definition.
 
 use crate::utils::{MaybeSend, MaybeSync};
 
@@ -50,74 +48,10 @@ pub trait Spawner: Clone + MaybeSend + MaybeSync + 'static {
     fn spawn_local<F>(&self, future: F)
     where
         F: std::future::Future<Output = ()> + 'static;
-}
 
-/// Tokio-based spawner for native platforms.
-#[cfg(feature = "client")]
-#[derive(Clone, Copy)]
-pub struct TokioSpawner;
-
-#[cfg(feature = "client")]
-impl Spawner for TokioSpawner {
-    fn spawn<F>(&self, future: F)
-    where
-        F: std::future::Future<Output = ()> + MaybeSend + 'static,
-    {
-        tokio::spawn(future);
-    }
-
-    fn spawn_with_local_context<F>(&self, future: F)
-    where
-        F: std::future::Future<Output = ()> + MaybeSend + 'static,
-    {
-        // Run on a dedicated thread with LocalSet for !Send futures.
-        // This thread runs its own single-threaded tokio runtime.
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to create tokio runtime");
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, future);
-        });
-    }
-
-    fn spawn_local<F>(&self, future: F)
-    where
-        F: std::future::Future<Output = ()> + 'static,
-    {
-        // Spawn on the current LocalSet (must be called from within spawn_with_local_context)
-        tokio::task::spawn_local(future);
-    }
-}
-
-/// WASM spawner using wasm-bindgen-futures.
-#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-#[derive(Clone, Copy)]
-pub struct WasmSpawner;
-
-#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-impl Spawner for WasmSpawner {
-    fn spawn<F>(&self, future: F)
-    where
-        F: std::future::Future<Output = ()> + MaybeSend + 'static,
-    {
-        wasm_bindgen_futures::spawn_local(future);
-    }
-
-    fn spawn_with_local_context<F>(&self, future: F)
-    where
-        F: std::future::Future<Output = ()> + MaybeSend + 'static,
-    {
-        // WASM is single-threaded, always has local context
-        wasm_bindgen_futures::spawn_local(future);
-    }
-
-    fn spawn_local<F>(&self, future: F)
-    where
-        F: std::future::Future<Output = ()> + 'static,
-    {
-        // WASM is single-threaded, spawn_local always works
-        wasm_bindgen_futures::spawn_local(future);
-    }
+    /// Yield control to let other tasks run.
+    ///
+    /// On native, this yields the current tokio task. On WASM, this is a no-op
+    /// since the single-threaded runtime handles scheduling automatically.
+    fn yield_now(&self) -> impl std::future::Future<Output = ()> + Send;
 }
