@@ -6,8 +6,10 @@
 mod actor;
 mod bridge;
 mod channel;
-mod types;
+mod connector;
+mod runtime;
 mod sink;
+mod types;
 
 use crate::utils::ChannelMessage;
 use std::marker::PhantomData;
@@ -19,8 +21,10 @@ use std::rc::Rc;
 pub use actor::with_client_actor;
 pub use bridge::{BridgeEvent, NetworkBridge};
 pub use channel::{ClientConnection, Connection};
-pub use types::{ServerTarget, ClientMessage, ClientSource};
+pub use connector::BridgeConnector;
+pub use runtime::{ActorRuntime, RuntimeStatus};
 pub use sink::{ClientSink, ClientOutput};
+pub use types::{ClientMessage, ClientSource, ServerTarget};
 
 /// Error when sending to actor fails.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -66,6 +70,16 @@ impl<M: ChannelMessage> ClientActorSender<M> {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new_from_sender(tx: mpsc::UnboundedSender<M>) -> Self {
+        Self::new(tx)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn new_from_sender(tx: mpsc::UnboundedSender<M>) -> Self {
+        Self::new(tx)
+    }
+
     /// Send a message to the actor.
     pub fn send(&self, message: M) -> Result<(), ActorSendError> {
         self.tx.send(message).map_err(|_| ActorSendError::ChannelClosed)
@@ -105,6 +119,18 @@ impl<M: ChannelMessage> LocalSender<M> {
             tx: Rc::new(tx),
             _marker: PhantomData,
         }
+    }
+
+    /// Create from an existing sender (used by ActorRuntime).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new_from_sender(tx: mpsc::UnboundedSender<M>) -> Self {
+        Self::new(tx)
+    }
+
+    /// Create from an existing sender (used by ActorRuntime).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn new_from_sender(tx: mpsc::UnboundedSender<M>) -> Self {
+        Self::new(tx)
     }
 
     /// Send a local message directly to the actor (bypasses network).

@@ -48,6 +48,7 @@ pub use client_actor::{
     ClientActorHandle, ActorSendError, ClientConnection, Connection, SharedPtr, ClientActorSender,
     ClientMessage, ClientSource, ClientSink, ClientOutput, ServerTarget, LocalSender,
     NetworkBridge, BridgeEvent, with_client_actor,
+    ActorRuntime, BridgeConnector, RuntimeStatus,
 };
 
 #[cfg(any(feature = "client", all(feature = "wasm", target_arch = "wasm32")))]
